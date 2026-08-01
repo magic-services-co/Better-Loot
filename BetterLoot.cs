@@ -1,0 +1,3065 @@
+using System;
+using System.IO;
+using Oxide.Core;
+using System.Data;
+using System.Linq;
+using UnityEngine;
+using Rust.Ai.Gen2;
+using Newtonsoft.Json;
+using Facepunch.Extend;
+using Oxide.Core.Plugins;
+using System.Collections;
+using System.Globalization;
+using Newtonsoft.Json.Linq;
+using static ConsoleSystem;
+using Pool = Facepunch.Pool;
+using UnityEngine.Networking;
+using Random = System.Random;
+using System.Collections.Generic;
+using System.Runtime.Serialization;
+using System.Text.RegularExpressions;
+using Oxide.Plugins.BetterLootExtensions;
+
+namespace Oxide.Plugins
+{
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.2.5")]
+    [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
+    public class BetterLoot : RustPlugin
+    {
+        #region Fields
+        [PluginReference] Plugin? CustomLootSpawns;
+
+        // Static Instance
+        private static BetterLoot? _instance;
+        private static PluginConfig? _config;
+
+        // System States
+        private bool Changed = true;
+        private static bool NewConfigGenerated;
+        private static bool NewSave;
+        private static bool Initialized;
+
+        private static Random? RNG;
+        private static Regex? UniqueTagREGEX;
+
+        // Data Instances
+        private Dictionary<string, List<string>[]> Items = new Dictionary<string, List<string>[]>(); // Cached Item Data for each container
+        private Dictionary<string, List<string>[]> Blueprints = new Dictionary<string, List<string>[]>(); // Cached Blueprint Data for each container
+        private Dictionary<string, int[]> ItemWeights = new Dictionary<string, int[]>(); // Item weights for each container
+        private Dictionary<string, int[]> BlueprintWeights = new Dictionary<string, int[]>(); // Blueprint weights for each container
+        private Dictionary<string, int> TotalItemWeights = new Dictionary<string, int>(); // Total sum of item weights for each container
+        private Dictionary<string, int> TotalBlueprintWeights = new Dictionary<string, int>(); // Total sum of blueprint weights for each container
+        
+        #region Info Caching
+        private Dictionary<string, WI_Cache>? WeaponInfoCache; // Item info for building table 
+        private Dictionary<string, ItemSlot>? WeaponModInfoCache; // Weapon mod shortname to enum mapping.
+        private List<string>? DurabilityItems;  // Items that need the durability property 
+        private static ItemDefinition? BlueprintBaseDef;
+        private List<string> ItemManagerItemNamesList = new List<string>();
+        
+        /// <summary>
+        /// Info for each weapon type item
+        /// Contains info for building config data for if a item is a weapon (it will be in this dict) as well as how many mods and how much ammo it is allowed to have.
+        /// </summary>
+        private sealed class WI_Cache
+        {
+            public bool IsLiquidWeapon { get; } // is a watergun.
+            public int MaxMods { get; } // if > 0 can have mods + max mods property.
+            public int MaxAmmo { get; } // vanilla max ammo.
+            public ItemSlot ModTypes { get; } // The types of mods that can be applied to this weapon.
+
+            public WI_Cache(bool isLiquidWeapon, int maxMods, int maxAmmo, ItemSlot modTypes)
+            {
+                //IsLiquidWeapon = isLiquidWeapon;
+                MaxMods = maxMods;
+                MaxAmmo = maxAmmo;
+                ModTypes = modTypes;
+            }
+        }
+        #endregion
+        #endregion
+
+        #region Instance Constants
+        private const double BASE_ITEM_RARITY = 2;
+        private const string ADMIN_PERM = "betterloot.admin";
+        #endregion
+
+        #region Lang
+        private string BLLang(string key, string? id = null) => lang.GetMessage(key, this, id);
+        private string BLLang(string key, string? id, params object[] args) => string.Format(BLLang(key, id), args);
+
+        protected override void LoadDefaultMessages()
+        {
+            lang.RegisterMessages(new Dictionary<string, string>
+            {
+                { "initialized", "Plugin not enabled" },
+                { "perm", "You are not authorized to use this command" },
+                { "syntax", "Usage: /blacklist [additem|deleteitem] \"ITEMNAME\"" },
+                { "none", "There are no blacklisted items" },
+                { "blocked", "Blacklisted items: {0}" },
+                { "notvalid", "Not a valid item: {0}" },
+                { "blockedpass", "The item '{0}' is now blacklisted" },
+                { "blockedtrue", "The item '{0}' is already blacklisted}" },
+                { "unblacklisted", "The item '{0}' has been unblacklisted" },
+                { "blockedfalse", "The item '{0}' is not blacklisted" },
+                { "lootycmdformat", "Usage: /looty \"looty-id\"" }, // Blank code provided.
+                { "lootynotfound", "The requested table id was not found. Please ensure youve got the right code." } // 404 Looty api
+            }, this); //en
+        }
+        #endregion
+
+        #region Config
+        private class PluginConfig : SerializableConfiguration
+        {
+            [JsonProperty("Chat Configuration")]
+            public ChatConfiguration ChatConfig = new ChatConfiguration();
+            [JsonProperty("General Configuration")]
+            public GenericConfiguration Generic = new GenericConfiguration();
+            [JsonProperty("Loot Configuration")]
+            public LootConfiguration Loot = new LootConfiguration();
+            [JsonProperty("Loot Groups Configuration")]
+            public LootGroupsConfiguration LootGroupsConfig = new LootGroupsConfiguration();
+        }
+
+        private class GenericConfiguration
+        {
+            [JsonProperty("Blueprint Weight (0.0 = min bias, 1.0 = max bias, 0.5 = balanced)")]
+            public double BlueprintWeight = 0.11;
+
+            #region v4.2.1 Configuration Migration
+            [JsonProperty("Blueprint Probability")]
+            private double? LegacyBlueprintProbability { set => LegacyMigrate_BlueprintProbability(value); }
+
+            private void LegacyMigrate_BlueprintProbability(double? value)
+            {
+                if (value.HasValue)
+                    BlueprintWeight = value.Value;
+            }
+            #endregion
+
+            [JsonProperty("Log Updates On Load")]
+            public bool ListUpdatesOnLoad = true;
+            [JsonProperty("Remove Stacked Containers")]
+            public bool RemoveStackedContainers = true;
+            [JsonProperty("Only update prefab list on wipe day")]
+            public bool OnlyUpdatePrefabListOnWipe = false; // Slightly faster start time. (Doesnt check to regenerate prefab watch list from game manifest every startup).
+            [JsonProperty("Auto enable new prefabs found on wipe")]
+            public bool AutoEnableNewContainers = true;
+            [JsonProperty("Watched Container Prefabs (true = monitor container loot, false = disabled)")]
+            public Dictionary<string, bool> WatchedPrefabs = new();
+
+            #region v4.1.7 Configuration Migration
+            [JsonProperty("Watched Prefabs")]
+            private HashSet<string>? LegacyWatchedPrefabs { set => LegacyMerge_WatchedPrefabs(value); }
+
+            private void LegacyMerge_WatchedPrefabs(IEnumerable<string>? values)
+            {
+                if (values == null)
+                    return;
+
+                foreach (string prefab in values)
+                    if (!string.IsNullOrWhiteSpace(prefab))
+                        WatchedPrefabs.TryAdd(prefab, true);
+            }
+            #endregion
+        }
+
+        private class LootConfiguration
+        {
+            [JsonProperty("Enable Hammer Hit Loot Cycle")]
+            public bool EnableHammerLootCycle = false;
+            [JsonProperty("Hammer Loot Cycle Time")]
+            public double HammerLootCycleTime = 3.0;
+            [JsonProperty("Loot Multiplier")]
+            public int LootMultiplier = 1;
+            [JsonProperty("Scrap Multipler")]
+            public int ScrapMultiplier = 1;
+            [JsonProperty("Allow duplicate items")]
+            public bool AllowDuplicateItems = true;
+            [JsonProperty("Enable logging for item attachments auto balancing operations")]
+            public bool EnableBonusItemsAutoBalanceLogging = false;
+            [JsonProperty("Always allow duplicate items from bonus items list (if set, will override 'Allow duplicate items option')")]
+            public bool AllowBonusItemsDuplicateItems = true;
+            [JsonProperty("Enable Blueprint Conversion")]
+            public bool EnableBlueprintConversion = true;
+            [JsonProperty("Allow Duplicate Blueprints")]
+            public bool AllowDuplicateBlueprints = false;
+            [JsonProperty("Enable Loot Pool Locking System")]
+            public bool EnableLootPoolLocking = true;
+        }
+
+        private class ChatConfiguration
+        {
+            [JsonProperty("Chat Message Prefix")]
+            public string Prefix = $"[<color=#00ff00>{nameof(BetterLoot)}</color>]";
+            [JsonProperty("Chat Message Icon SteamID (0 = None)")]
+            public ulong MessageIcon = 0;
+        }
+
+        private class LootGroupsConfiguration
+        {
+            [JsonProperty("Enable creation of example loot group on load?")]
+            public bool EnableExampleGroupCreation = true;
+            [JsonProperty("Enable auto profile probability balancing?")]
+            public bool EnableProbabilityBalancing = true;
+            [JsonProperty("Always allow duplicate items from loot groups (if true overrides 'Allow duplicate items option')")]
+            public bool AllowLootGroupDuplicateItems = true;
+            [JsonProperty("Allowed probablity difference to select neighbour during duplicate item resolution.")]
+            public double AllowedDuplicateNudgeDifference = 10;
+        }
+
+        /// <summary>
+        /// As of v4.1.7 this system runs everytime to check for new prefabs as well as maintain the integrity of the current prefab list that is available so it can be enabled / disabled easily at any time.
+        /// This behaviour can optionally be disabled in the config for it to only run on wipe day (to update for any new prefab types after a update)
+        /// </summary>
+        private void CheckWatchedPrefabs()
+        {
+            /* Watched Prefabs Auto-Population */
+            if (_config.Generic.OnlyUpdatePrefabListOnWipe && !NewSave) // If it is a new wipe new found prefabs will be auto enabled.
+                return;
+
+            NewConfigGenerated = _config.Generic.WatchedPrefabs.Count == 0;
+
+            if (NewConfigGenerated)
+                Log("Checking for missing viable loot containers in prefab watch list. (Currently disabled containers will stay disabled).");
+
+            // Name filtering
+            List<string> negativePartialNames = Pool.Get<List<string>>();
+            List<string> partialNames = Pool.Get<List<string>>();
+
+            // If does not contain, skip
+            negativePartialNames.AddRange(new[]
+            {
+                "resource/loot",
+                "misc/supply drop/supply_drop",
+                "/npc/m2bradley/bradley_crate",
+                "/npc/patrol helicopter/heli_crate",
+                "/deployable/chinooklockedcrate/chinooklocked",
+                "/deployable/chinooklockedcrate/codelocked",
+                "prefabs/radtown",
+                "props/roadsigns",
+                "humannpc/scientist",
+                "humannpc/tunneldweller",
+                "humannpc/underwaterdweller",
+                "ptboat.deepsea",
+                "rhib.deepsea",
+                "cache/food"
+            });
+
+            // If does contain, skip
+            partialNames.AddRange(new[]
+            {
+                "radtown/ore",
+                "static",
+                "/spawners",
+                "radtown/desk",
+                "radtown/loot_component_test",
+                "chinooklockedcrate/chinooklockedcrate", // Specific crate with no spawnable
+                "water_puddles_border_fix" // Weird container prefab from radtown update??
+            });
+
+            // Adding default values
+            foreach (GameManifest.PrefabProperties category in GameManifest.Current.prefabProperties)
+            {
+                string name = category.name;
+
+                if (!negativePartialNames.ContainsPartial(name) || partialNames.ContainsPartial(name))
+                    continue;
+
+                // Add false by default, may have been disabled by user if was not in list from previous version. If is a new wipe and auto-enable is set, containers will be added as enabled prefabs.
+                _config.Generic.WatchedPrefabs.TryAdd(name, NewConfigGenerated || (NewSave && _config.Generic.AutoEnableNewContainers));
+            }
+
+            if (NewConfigGenerated)
+            {
+                Log("Updated configuration with manifest values.");
+                AttemptSendLootyLink();
+            }
+
+            Pool.FreeUnmanaged(ref negativePartialNames);
+            Pool.FreeUnmanaged(ref partialNames);
+        }
+
+        protected override void LoadDefaultConfig() => _config = new PluginConfig();
+
+        protected override void LoadConfig()
+        {
+            base.LoadConfig();
+
+            try
+            {
+                _config = Config.ReadObject<PluginConfig>();
+
+                if (MaybeUpdateConfig(_config))
+                {
+                    Log("Configuration appears to be outdated; updating and saving Better Loot");
+                    SaveConfig();
+                }
+
+                Log("Loaded configuration!");
+            }
+            catch (Exception ex)
+            {
+                Log("Failed to load Better Loot config file (is the config file corrupt?) (" + ex.Message + ")");
+            }
+        }
+
+        protected override void SaveConfig()
+        {
+            Log($"Configuration changes saved to {nameof(BetterLoot)}.json");
+            Config.WriteObject(_config, true);
+        }
+
+        #region Configuration Updater
+        internal class SerializableConfiguration
+        {
+            public string ToJson() => JsonConvert.SerializeObject(this);
+
+            public Dictionary<string, object> ToDictionary() => JsonHelper.Deserialize(ToJson()) as Dictionary<string, object>;
+        }
+
+        private static class JsonHelper
+        {
+            public static object Deserialize(string json) => ToObject(JToken.Parse(json));
+
+            private static object ToObject(JToken token)
+            {
+                switch (token.Type)
+                {
+                    case JTokenType.Object:
+                        return token.Children<JProperty>().ToDictionary(prop => prop.Name, prop => ToObject(prop.Value));
+                    case JTokenType.Array:
+                        return token.Select(ToObject).ToList();
+
+                    default:
+                        return ((JValue)token).Value;
+                }
+            }
+        }
+
+        private bool MaybeUpdateConfig(SerializableConfiguration config)
+        {
+            var currentWithDefaults = config.ToDictionary();
+            var currentRaw = Config.ToDictionary(x => x.Key, x => x.Value);
+            return MaybeUpdateConfigDict(currentWithDefaults, currentRaw);
+        }
+
+        private bool MaybeUpdateConfigDict(Dictionary<string, object> currentWithDefaults, Dictionary<string, object> currentRaw)
+        {
+            bool changed = false;
+
+            foreach (var key in currentWithDefaults.Keys)
+            {
+                if (currentRaw.TryGetValue(key, out object? currentRawValue) && currentRawValue is not null)
+                {
+                    var defaultDictValue = currentWithDefaults[key] as Dictionary<string, object>;
+                    var currentDictValue = currentRawValue as Dictionary<string, object>;
+
+                    if (defaultDictValue != null)
+                    {
+                        if (currentDictValue == null)
+                        {
+                            currentRaw[key] = currentWithDefaults[key];
+                            changed = true;
+                        }
+                        else if (MaybeUpdateConfigDict(defaultDictValue, currentDictValue))
+                            changed = true;
+                    }
+                }
+                else
+                {
+                    currentRaw[key] = currentWithDefaults[key];
+                    changed = true;
+                }
+            }
+
+            return changed;
+        }
+        #endregion
+        #endregion
+
+        #region Oxide Loaded / Unload / Server Load / New Save
+        private void Loaded()
+        {
+            _instance = this;
+            RNG = new Random();
+            UniqueTagREGEX = new Regex(@"\{\d+\}", RegexOptions.Compiled);
+            
+            DataSystem.LoadBlacklist();
+            DataSystem.LoadLootTables();
+            DataSystem.LoadLootGroups();
+        }
+
+        private void OnServerInitialized()
+        {
+            try
+            {
+                CheckWatchedPrefabs(); // Called so OnNewSave can trigger flag
+
+                ItemManager.Initialize();
+                BlueprintBaseDef = ItemManager.FindItemDefinition("blueprintbase");
+                BuildWeaponInfoCache();
+
+                permission.RegisterPermission(ADMIN_PERM, this);
+                InitLootSystem();
+            }
+            catch (Exception ex)
+            {
+                Puts($"Error initializing plugin. Please ensure you configuration and data files are corrent and that you have used the looty editor to confirm. EX: \n{ex.Message}");
+                Server.Command($"o.unload {Name}");
+            }
+        }
+
+        private void InitLootSystem(bool newData = false)
+        {
+            // Ensure empty, is called when looty tables are loaded.
+            if (newData)
+            {
+                Items.Clear();
+                Blueprints.Clear();
+                ItemWeights.Clear();
+                BlueprintWeights.Clear();
+                TotalItemWeights.Clear();
+                TotalBlueprintWeights.Clear();
+
+                BuildWeaponInfoCache();
+            }
+
+            // Load container data
+            LoadAllContainers();
+
+            Pool.FreeUnmanaged(ref WeaponInfoCache);
+            Pool.FreeUnmanaged(ref WeaponModInfoCache);
+            Pool.FreeUnmanaged(ref DurabilityItems);
+
+            UpdateInternals(_config.Generic.ListUpdatesOnLoad);
+        }
+
+        private void Unload()
+        {
+            // Static variable instances
+            UniqueTagREGEX = null;
+
+            storedBlacklist = null;
+            lootTables = null;
+            lootGroups = null;
+            RNG = null;
+            BlueprintBaseDef = null;
+
+            // Reset Static Flags
+            NewConfigGenerated = false;
+            NewSave = false;
+            Initialized = false;
+
+            // Static BetterLoot instance
+            _instance = null;
+            _config = null;
+
+            foreach (HammerHitLootCycle hhlc in UnityEngine.Object.FindObjectsByType<HammerHitLootCycle>(FindObjectsInactive.Include, FindObjectsSortMode.None).Where(i => i is not null))
+                UnityEngine.Object.Destroy(hhlc);
+        }
+
+        // Set flag so new prefabs can be autoenabled
+        private void OnNewSave(string _)
+            => NewSave = true;
+        #endregion
+
+        #region DataFile
+        private static LootTableData? lootTables = null;
+        private static StoredBlacklist? storedBlacklist = null;
+        private static LootGroupsData? lootGroups = null;
+
+        // Looty API Schema
+        private sealed record LootyResponse
+        {
+            public LootyTarget looty = new ();
+            [JsonProperty("LootTable")]
+            public Dictionary<string, PrefabLoot> LootTables = new();
+            [JsonProperty("Loot Groups")]
+            public Dictionary<string, LootProfile>? LootGroups = new();
+
+            public LootyResponse() { }
+
+            public sealed record LootyTarget
+            {
+                public string target;
+                public string id;
+            }
+        }
+
+        // LootTables.json structure
+        private class LootTableData
+        {
+            public Dictionary<string, PrefabLoot> LootTables = new Dictionary<string, PrefabLoot>();
+
+            public LootTableData() { }
+        }
+
+        // Blacklist.json structure
+        private class StoredBlacklist
+        {
+            public HashSet<string> ItemList = new HashSet<string>();
+
+            public StoredBlacklist() { }
+        }
+
+        private class LootGroupsData
+        {
+            [JsonProperty("Loot Groups", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public Dictionary<string, LootProfile> LootGroups = new Dictionary<string, LootProfile>
+            {
+                ["example_group"] = new LootProfile(new Dictionary<string, LootProfile.LootRNG> { ["lmg.m249"] = new LootProfile.LootRNG(10, new LootEntry(1, 2)) }, false)
+            };
+
+            public LootGroupsData() { }
+
+            public static void ValidateGroups(LootGroupsData? Data)
+            {
+                ItemManager.Initialize();
+
+                if (ItemManager.itemDictionaryByName is null)
+                {
+                    Log("Error: Failed to initialize ItemDictionary. Unloading");
+                    _instance.Server.Command($"o.unload BetterLoot");
+                    return;
+                }
+
+                if (Data is null || Data.LootGroups is null)
+                {
+                    Log($"Error: Invalid data was provided to the {nameof(LootGroupsData)} validator!");
+                    return;
+                }
+
+                // Attempt to create an example group in the LootGroups file
+                TryCreateExampleGroup();
+
+                foreach ((string profileName, LootProfile? profileData) in Data.LootGroups)
+                {
+                    Log($"Validating LootGroup: \"{profileName}\"");
+
+                    // NRE Data Check
+                    if (profileData.ItemList is null)
+                    {
+                        Log("- Error: Profile item list is null. Skipping...");
+                        continue;
+                    }
+
+                    // Ensure items are valid
+                    List<string> invalidItemPrefabs = Pool.Get<List<string>>();
+                    invalidItemPrefabs.AddRange(profileData.ItemList.Keys.Where(key => !ItemManager.itemDictionaryByName.ContainsKey(UniqueTagREGEX.Replace(key.ToLower(), string.Empty))));
+
+                    if (profileData.ItemList.RemoveAll(invalidItemPrefabs.Contains) is int removeCount && removeCount > 0)
+                        Log($"Error - Removing {removeCount} invalid entries. Please check item names that were not found in the games item dictionary: ({string.Join(", ", invalidItemPrefabs)})");
+
+                    Pool.FreeUnmanaged(ref invalidItemPrefabs);
+
+                    string extraReason = string.Empty;
+                    if (profileData.ItemList.Count > 0) // Ensure we still have items
+                    {
+                        // Balance loot percentages
+                        if (_config.LootGroupsConfig.EnableProbabilityBalancing)
+                        {
+                            double GetSum() => profileData.ItemList.Sum(x => x.Value.Probability);
+                            double Round(double x) => Math.Round(x, 2);
+
+                            const double target = 100;
+                            double sum = GetSum();
+
+                            if (Math.Abs(target - sum) > 1e-3)
+                            {
+                                Log($"- Profile probability sum ({sum}) != 100. Balancing profile!");
+
+                                double _ratio = target / sum;
+
+                                // Set first key as largest by default for empty string edgecase
+                                string largestKey = profileData.ItemList.Keys.First();
+                                double largestValue = profileData.ItemList[largestKey].Probability;
+
+                                foreach (var item in profileData.ItemList)
+                                {
+                                    double probability = item.Value.Probability;
+                                    if (probability > largestValue)
+                                    {
+                                        largestValue = probability;
+                                        largestKey = item.Key;
+                                    }
+
+                                    item.Value.Probability = Round(probability * _ratio);
+                                }
+
+                                var largestEntry = profileData.ItemList[largestKey];
+                                largestEntry.Probability = Round(largestEntry.Probability - Round(target - GetSum()));
+                            }
+                        }
+                        else
+                        {
+                            extraReason = "Probability balance skipped.";
+                        }
+                    }
+                    else
+                    {
+                        extraReason = "No remaining / valid items in profile, skipped.";
+                    }
+
+                    Log($"Profile \"{profileName}\" validation complete. {extraReason}");
+                }
+            }
+
+            public static void TryCreateExampleGroup()
+            {
+                if (!_config.LootGroupsConfig.EnableExampleGroupCreation)
+                    return;
+
+                // Create a default group in the first item of the loot table for reference if none exists
+                var firstLootTable = lootTables.LootTables.FirstOrDefault();
+                if (!firstLootTable.IsDefault() && firstLootTable.Value.LootProfiles.Count == 0)
+                {
+                    firstLootTable.Value.LootProfiles.Add(new PrefabLoot.LootProfileImport("example_group", 30, false));
+                    Log($"Added LootGroup Import example to \"{firstLootTable.Key}\"");
+                    DataSystem.SaveLootTables();
+                }
+            }
+        }
+
+        private static class DataSystem
+        {
+            #region Public Methods
+            #region Blacklist
+            private const string BL_FN = "Blacklist";
+
+            public static void LoadBlacklist()
+                => LoadFile(BL_FN, (blacklistData) => CheckNull(ref blacklistData, ref storedBlacklist, blacklistData?.ItemList), ref storedBlacklist);
+
+            public static void SaveBlacklist()
+                => SaveFile(BL_FN, (blacklistData) => CheckNull(ref blacklistData, ref storedBlacklist, blacklistData?.ItemList), ref storedBlacklist);
+            #endregion
+
+            #region Loot Tables
+            private const string LT_FN = "LootTables";
+
+            public static void LoadLootTables()
+                => LoadFile(LT_FN, (tableData) => CheckNull(ref tableData, ref lootTables, tableData?.LootTables), ref lootTables);
+
+            public static void SaveLootTables()
+                => SaveFile(LT_FN, (tableData) => CheckNull(ref tableData, ref lootTables, tableData?.LootTables), ref lootTables);
+            #endregion
+
+            #region Loot Groups
+            private const string LG_FN = "LootGroups";
+
+            public static void LoadLootGroups()
+                => LoadFile(LG_FN, (groupsData) => CheckNull(ref groupsData, ref lootGroups), ref lootGroups, LootGroupsData.ValidateGroups);
+
+            public static void SaveLootGroups()
+                => SaveFile(LG_FN, (groupsData) => CheckNull(ref groupsData, ref lootGroups), ref lootGroups);
+            #endregion
+            #endregion
+
+            #region DataFile Error Backup
+            public static void BakDataFile(string filename, bool isRestoring = false, BasePlayer? msgPlayer = null)
+            {
+                // Move these to lang
+                const string NoRestoreFileFound = "No backup file to restore.";
+                const string NoMainFileFound = "No file found to move to backup, skipping file.";
+                const string FileRestored = "Backup restored.";
+                const string BackupTaken = "File backed up to bak file.";
+
+                bool sendPlayer = msgPlayer is not null;
+                string notifyMessage = string.Format(isRestoring ? "Restoring backup of {0}" : "Attempting to create backup of datafile {0}", $"{filename}.json");
+
+                void Respond(string message)
+                {
+                    if (sendPlayer)
+                        _instance?.SendMessage(msgPlayer, message);
+                    else
+                        Log(message);
+                }
+                
+                Respond(notifyMessage);
+                
+                // Rename specified file to *.bak before regenerating a file in place of it
+                string dataFilePath = Path.Combine(Interface.Oxide.DataFileSystem.Directory, $"{nameof(BetterLoot)}/{filename}.json");
+                string bakFilePath = $"{dataFilePath}.bak";
+                
+                if (!isRestoring)
+                {
+                    if (!File.Exists(dataFilePath))
+                    {
+                        Respond(NoMainFileFound);
+                        return;
+                    }
+                        
+                    if (File.Exists(bakFilePath))
+                        File.Delete(bakFilePath);
+                    
+                    File.Copy(dataFilePath, bakFilePath);
+                } else
+                {
+                    if (!File.Exists(bakFilePath))
+                    {
+                        Respond(NoRestoreFileFound);
+                        return;
+                    }
+                    
+                    if (File.Exists(dataFilePath))
+                        File.Delete(dataFilePath);
+                    
+                    File.Copy(bakFilePath, dataFilePath);
+                }
+                
+                if (isRestoring)
+                {
+                    Respond(FileRestored);
+                    _instance.InitLootSystem(true);
+                } else
+                {
+                    Respond(BackupTaken);
+                }
+            }
+            #endregion
+
+            #region Save / Load Methods
+            /// <summary>
+            /// Load a data from a file within the plugin data directory.
+            /// </summary>
+            /// <typeparam name="T">The structure of the data being read from the file.</typeparam>
+            /// <param name="fileName">The name of the file within the plugin data directory</param>
+            /// <param name="validator">A custom data validator. Is nullable.</param>
+            /// <param name="loadVar">The variable where the loaded data should be stored.</param>
+            private static void LoadFile<T>(string fileName, Func<T, T>? validator, ref T loadVar, Action<T>? postLoadMethod = null) where T : class?
+            {
+                // If no validator was provided, set to check if instance is null, if it is create new instance.
+                if (validator is null)
+                    validator = (data) => data ?? Activator.CreateInstance<T>();
+
+                try
+                {
+                    loadVar = validator(Interface.Oxide.DataFileSystem.ReadObject<T>($"{nameof(BetterLoot)}\\{fileName}"));
+                    Log($"Loaded file \"{fileName}\" datafile successfully!");
+                }
+                catch (Exception e)
+                {
+                    Log($"ERROR: There was an issue loading your \"{fileName}.json\" datafile, a new one has been created.\n{e.Message}");
+
+                    BakDataFile(fileName);
+                    loadVar = Activator.CreateInstance<T>();
+                }
+
+                postLoadMethod?.Invoke(loadVar);
+
+                SaveFile(fileName, validator, ref loadVar);
+            }
+
+            /// <summary>
+            /// Save plugin data to the plugin data directory.
+            /// </summary>
+            /// <typeparam name="T">The type of the datafile structure</typeparam>
+            /// <param name="fileName">The name of the datafile within the plugin data directory.</param>
+            /// <param name="validator">A custom data validator. Is nullable.</param>
+            /// <param name="saveVar">The variable where this data is currently stored.</param>
+            private static void SaveFile<T>(string fileName, Func<T, T>? validator, ref T saveVar) where T : class?
+            {
+                if (validator is null)
+                    validator = (data) => data ?? Activator.CreateInstance<T>();
+
+                Interface.Oxide.DataFileSystem.WriteObject($"{nameof(BetterLoot)}\\{fileName}", validator(saveVar));
+
+                Log($"Saved {fileName}.json");
+            }
+            #endregion
+
+            #region Data Validator
+            /// <summary>
+            /// Checks if the provided datafile's data is null, if so create a new instance and optionally write it to file.
+            /// </summary>
+            /// <typeparam name="T">The type of the data structure that is being checked</typeparam>
+            /// <param name="obj">The local instance of the data to check</param>
+            /// <param name="target">The global instance of where the data is held</param>
+            /// <param name="additional">Additional objects to check if null aside from arguement 'obj'</param>
+            /// <returns>>Non null type of provided object type</returns>
+            private static T CheckNull<T>(ref T? obj, ref T? target, params object?[] additional) where T : class?
+            {
+                if (obj is null || additional.Any(x => x is null))
+                {
+                    target = Activator.CreateInstance<T>();
+                    obj = target;
+                }
+
+                return obj;
+            }
+            #endregion
+        }
+
+        private static void AttemptSendLootyLink()
+        {
+            Log("--------------------------------------------------------------------------");
+            Log("Use the Looty Editor to easily edit and create loot tables for BetterLoot!");
+            Log("Find it here -> https://looty.cc/betterloot-v4");
+            Log("--------------------------------------------------------------------------");
+        }
+        #endregion
+
+        #region Culminative Probabilities Class
+        public class ProbalisticRNG
+        {
+            [JsonIgnore]
+            private List<double> _culminativeProbabilities = new List<double>();
+
+            [JsonIgnore]
+            public bool DoProbabilitiesExist
+                => _culminativeProbabilities.Count > 0;
+
+            public void UpdateProbabilities(IEnumerable<double> probabilities)
+            {
+                double _culminative = 0;
+                foreach (int item in probabilities)
+                {
+                    _culminative += item;
+                    _culminativeProbabilities.Add(_culminative);
+                }
+            }
+
+            public int GetRandomIndex()
+            {
+                double randomSelect = RNG.NextDouble() * 1e2;
+                int elementIndex = _culminativeProbabilities.BinarySearch(randomSelect);
+
+                if (elementIndex < 0)
+                    elementIndex = ~elementIndex;
+
+                return elementIndex;
+            }
+        }
+        #endregion
+
+        #region Loot Classes
+        public record ItemConvertInfo(Item Item, bool CanBeBp);
+        
+        /// <summary>
+        /// Prefab Loot system will be contained in a list. This is the new loot class for loot containers that will
+        /// allow the import of custom loot groups allowing for RNG on groups as well as individual items
+        /// </summary>
+        private class PrefabLoot : ProbalisticRNG
+        {
+            [JsonProperty("Is Prefab Enabled?")]
+            public bool Enabled;
+
+            [JsonProperty("Loot Profiles", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public List<LootProfileImport> LootProfiles;
+
+            [JsonProperty("Enable Loot Pool Locking")]
+            public bool LootPoolLocking;
+
+            [JsonProperty("Select ungrouped items ignoring rarity bias")]
+            public bool IgnoreRarityBias;
+
+            [JsonProperty("Guaranteed Items")]
+            public Dictionary<string, LootEntrySettings> GuaranteedItems = new Dictionary<string, LootEntrySettings>();
+
+            [JsonProperty("Ungrouped Items")]
+            public Dictionary<string, LootEntry> UngroupedItems;
+
+            [JsonProperty("Item Settings")]
+            public ItemProperties ItemSettings;
+
+            public PrefabLoot()
+            {
+                LootProfiles = new List<LootProfileImport>();
+                UngroupedItems = new Dictionary<string, LootEntry>();
+                ItemSettings = new ItemProperties();
+            }
+
+            internal class LootProfileImport
+            {
+                [JsonProperty("Group Enabled?")]
+                public bool Enabled = true;
+                [JsonProperty("Loot Profile Name")]
+                public string LootProfileName = string.Empty;
+                [JsonProperty("Loot Profile Probability (1% - 100%)")]
+                public double LootProfileProbability;
+
+                internal LootProfileImport() { }
+
+                internal LootProfileImport(string LootProfileName, double LootProfileProbability, bool Enabled = true)
+                {
+                    this.LootProfileName = LootProfileName;
+                    this.LootProfileProbability = LootProfileProbability;
+                    this.Enabled = Enabled;
+                }
+            }
+
+            internal class ItemProperties
+            {
+                [JsonProperty("Minimum Amount of Items")]
+                public int ItemsMin;
+
+                [JsonProperty("Maximum Amount of Items")]
+                public int ItemsMax;
+
+                [JsonProperty("Minimum Scrap Amount")]
+                public int MinScrap;
+
+                [JsonProperty("Maximum Scrap Amount")]
+                public int MaxScrap;
+
+                [JsonProperty("Minimum Blueprints")]
+                public int MinBlueprints = 0;
+
+                [JsonProperty("Maximum Blueprints")]
+                public int MaxBlueprints = 0;
+
+                [JsonProperty("Bonus Items Contribute to Item Count")]
+                public bool bonusItemsAddCount;
+
+                [JsonProperty("Guaranteed Items Contribute to Item Count")]
+                public bool guaranteedItemsAddCount;
+
+                internal ItemProperties() { }
+
+                #region v4.0.6  / v4.2.1 Configuration Migration
+
+                [JsonProperty("Scrap Amount", NullValueHandling = NullValueHandling.Ignore)]
+                private int? LegacyScrap { get; set; }
+
+                [JsonProperty("Max Blueprints", NullValueHandling = NullValueHandling.Ignore)]
+                private int? LegacyMaxBPs { get; set; }
+
+                [OnDeserialized]
+                private void OnDeserialized(StreamingContext _)
+                {
+                    if (LegacyScrap.HasValue)
+                    {
+                        if (MaxScrap == 0)
+                        {
+                            MaxScrap = LegacyScrap.Value;
+                            MinScrap = LegacyScrap.Value;
+                        }
+                    }
+
+                    if (LegacyMaxBPs.HasValue && MaxBlueprints == 0)
+                    {
+                        MaxBlueprints = LegacyMaxBPs.Value;
+                    }
+
+                    LegacyScrap = null;
+                    LegacyMaxBPs = null;
+                }
+
+                [OnSerializing]
+                private void OnSerializing(StreamingContext _) => LegacyScrap = null; // force null, no omit
+                #endregion
+            }
+
+            #region Random Profile Selector
+            [JsonIgnore]
+            private List<int> _enabledProfiles = new (); // Map position to index
+
+            /// <summary>
+            /// Implemented binary search to select random loot import profile quickly. Returns null if should select from ungrouped items.
+            /// </summary>
+            /// <param name="tableReference">for reference to use in error message if there is a problem with the selection or config</param>
+            /// <returns></returns>
+            public LootProfile? GetRandomProfile(string? tableReference)
+            {
+                if (LootProfiles is null)
+                    return null;
+
+                if (!DoProbabilitiesExist)
+                { // Updates and uses probalistic probability based off of only enabled profiles
+                    List<LootProfileImport> _enabledProfiles = new List<LootProfileImport>();
+                    for (int i = 0; i < LootProfiles.Count; i++)
+                    {
+                        var _profile = LootProfiles[i];
+                        if (_profile.Enabled)
+                        {
+                            _enabledProfiles.Add(_profile);
+                            this._enabledProfiles.Add(i);
+                        }
+                    }
+
+                    UpdateProbabilities(_enabledProfiles.Select(x => x.LootProfileProbability));
+                }
+
+                int randomProfileIndex = GetRandomIndex();
+                if (randomProfileIndex >= _enabledProfiles.Count)
+                    return null;
+
+                var importProfile = LootProfiles[_enabledProfiles[randomProfileIndex]];
+
+                if (!lootGroups.LootGroups.TryGetValue(importProfile.LootProfileName, out LootProfile? profile))
+                {
+                    Log($"WARNING: prefab \"{tableReference}\" requested a loot group import with name \"{importProfile.LootProfileName}\". Group does not exist or is disabled in the LootGroups.json!");
+                    return null;
+                }
+                
+                // No Warning
+                if (!profile.Enabled)
+                    return null;
+
+                return profile;
+            }
+            #endregion
+        }
+
+        /// <summary>
+        /// LootProfile for containing all items that will be part of a certain profile
+        /// Will be referenced by the specified profile name that the user creates within the LootGroups.json
+        /// </summary>
+        public class LootProfile : ProbalisticRNG
+        {
+            [JsonProperty("Enabled?")]
+            public bool Enabled = true;
+
+            [JsonProperty("Guaranteed Items")]
+            public Dictionary<string, LootEntrySettings> GuaranteedItems = new ();
+
+            [JsonProperty("Item List")]
+            public Dictionary<string, LootRNG> ItemList;
+
+            public LootProfile(Dictionary<string, LootRNG> ItemList, bool Enabled = true)
+            {
+                this.ItemList = ItemList;
+                this.Enabled = Enabled;
+            }
+
+            public class LootRNG
+            {
+                [JsonProperty("Item Probability (1-100)")]
+                public double Probability;
+
+                [JsonProperty("Item Amount")]
+                public LootEntry Amount;
+
+                public LootRNG(double Probability, LootEntry Amount)
+                {
+                    this.Probability = Probability;
+                    this.Amount = Amount;
+                }
+            }
+
+            #region Probalistic Selector Methods
+            /// <summary>
+            /// Get a random item from this loot group based off of items probabilities
+            /// </summary>
+            public (ItemConvertInfo?, List<ItemConvertInfo>?) GetItem(HashSet<string> currentItemEntries)
+            {
+                int itemIndex = GetRandomIndex();
+
+                // No item found, out of index
+                if (itemIndex >= ItemList.Count)
+                    return (null, null);
+
+                var bonusItems = new List<ItemConvertInfo>();
+
+                var entry = ItemList.ElementAt(itemIndex);
+
+                if (!entry.Value.Amount.allowDuplicates && currentItemEntries.Contains(entry.Key))
+                {
+                    // Only item in the list and it's a duplicate, else all hope is lost :(
+                    if (ItemList.Count == 1)
+                        return (null, null);
+
+                    // Prefer the larger-index neighbour, fall back to smaller
+                    if (itemIndex < ItemList.Count - 1) itemIndex++;
+                    else if (itemIndex > 0 && (entry.Value.Probability - ItemList.ElementAt(itemIndex - 1).Value.Probability) <= _config.LootGroupsConfig.AllowedDuplicateNudgeDifference) itemIndex--;
+                    else return (null, null);
+
+                    // Set entry to the entry of the nudged index
+                    entry = ItemList.ElementAt(itemIndex);
+                }
+
+                entry.Value.Amount.CreateBonusItems(ref bonusItems);
+
+                // Create Item
+                string sanitizedName = UniqueTagREGEX.Replace(entry.Key, string.Empty);
+                Item item = ItemManager.CreateByPartialName(sanitizedName, GetRNG(entry.Value.Amount.Min, entry.Value.Amount.Max), entry.Value.Amount.SkinId);
+                
+                // Apply custom properties
+                entry.Value.Amount.ApplyAllProperties(item);
+
+                if (item is null)
+                    Log($"ERROR: item \"{entry.Key}\" could not be created! System returned null entry!");
+
+                // Add for future duplicate checking.
+                currentItemEntries.Add(entry.Key);
+
+                return (new ItemConvertInfo(item, entry.Value.Amount.CanConvertToBlueprint ?? false), bonusItems);
+            }
+            #endregion
+        }
+
+        #region Loot Entry
+        public class LootEntrySettings
+        {
+            [JsonProperty("Skin ID (0 = default)")]
+            public ulong SkinId = 0;
+
+            [JsonProperty("Display Name (empty = none)")]
+            public string? DisplayName = string.Empty;
+
+            [JsonProperty("Item Minimum")]
+            public int Min;
+
+            [JsonProperty("Item Maximum")]
+            public int Max;
+
+            [JsonProperty("Can Convert To Blueprint", NullValueHandling = NullValueHandling.Ignore)]
+            public bool? CanConvertToBlueprint;
+
+            [JsonProperty("Item Durability", NullValueHandling = NullValueHandling.Ignore)]
+            public LootEntryDurability? DurabilitySettings;
+
+            // By default will not exist in item entries. System will add it during table scan.
+            [JsonProperty("Item Properties", NullValueHandling = NullValueHandling.Ignore)]
+            public ItemEntrySettings? ItemEntryModifications;
+
+            public void ApplyAllProperties(Item item)
+            {
+                ApplyAmmo(item);
+                ApplyAttachments(item);
+                
+                if (!string.IsNullOrWhiteSpace(DisplayName))
+                    item.name = DisplayName;
+                
+                if (DurabilitySettings is {})
+                    item.ChangeConditionPercentage(GetRNG(DurabilitySettings.MinDurability, DurabilitySettings.MaxDurability));
+                
+                item.MarkDirty();
+            }
+            
+            public void ApplyAttachments(Item item)
+            {
+                // No mods to apply
+                if (!(ItemEntryModifications?.AttachmentSettings?.itemMods?.Count > 0))
+                    return;
+
+                // Recursively apply
+                int total = Math.Clamp(GetRNG(ItemEntryModifications.AttachmentSettings.minModAmount, ItemEntryModifications.AttachmentSettings.maxModAmount), 1, ItemEntryModifications.maxMods);
+                for (int i = 0; i < total; i++)
+                {
+                    for (int r = 0; r < 5; r++)
+                    {
+                        Item? itemMod = ItemEntryModifications?.GetRandomItemMod();
+                        if (itemMod is null) // No item selected! This is ok.
+                            break;
+
+                        // Attempt to regenerate if there is a duplicate
+                        if (itemMod.MoveToContainer(item.contents))
+                            break;
+                    }
+                }
+            }
+
+            public void ApplyAmmo(Item item)
+            {
+                if (ItemEntryModifications?.AmmunitionSettings is not ItemEntrySettings.AmmoSettings ammoSettings || string.IsNullOrWhiteSpace(ammoSettings.AmmoItemShortname))
+                    return;
+
+                // if extended mag is applied, add 25% to calculated ammo amount
+                ItemDefinition? ammoDef = null;
+                int ammoAmount = 1;
+                bool applyExtraAmmo = item.contents?.itemList.Any(x => x.info.shortname.Equals("weapon.mod.extendedmags")) ?? false;
+
+                if (ammoSettings.CanHoldMultipleAmmoUnits)
+                {
+                    ammoDef = ItemManager.FindDefinitionByPartialName(ammoSettings.AmmoItemShortname);
+                    ammoAmount = Math.Clamp(GetRNG(ammoSettings.Min, ammoSettings.Max), 0, ammoSettings.MaxAmmo);
+
+                    if (item.contents?.itemList.Any(x => x.info.shortname.Equals("weapon.mod.extendedmags")) ?? false)
+                        ammoAmount = (int)Math.Ceiling(ammoAmount * 1.25);
+                }
+                else if (GetRNG(0, 100) <= ammoSettings.Probability)
+                {
+                    ammoDef = ItemManager.FindDefinitionByPartialName(ammoSettings.AmmoItemShortname);
+                }
+
+                // No ammo defined
+                if (ammoDef is null)
+                    return;
+
+                // Type check of how should apply
+                var heldEntity = item.GetHeldEntity();
+                if (heldEntity is BaseProjectile bp)
+                {
+                    bp.primaryMagazine.ammoType = ammoDef;
+                    bp.primaryMagazine.contents = ammoAmount;
+                    bp.SendNetworkUpdateImmediate();
+                }
+                else if (heldEntity is FlameThrower ft)
+                {
+                    // Vanilla rust spawns this with full fuel
+                    // By default should only be lowgrade fuel but leave the definition open for allowing custom fuel types
+                    ft.fuelType = ammoDef;
+                    ft.ammo = ammoAmount;
+                    ft.SendNetworkUpdateImmediate();
+                }
+                else if (heldEntity is LiquidWeapon lw)
+                {
+                    if (lw.GetContents() is Item _liquid)
+                    {
+                        _liquid.amount = ammoAmount;
+                        _liquid.MarkDirty();
+                    }
+                    else
+                    {
+                        Item liquid = ItemManager.Create(ammoDef, ammoAmount);
+                        liquid.MoveToContainer(item.contents);
+                        item.MarkDirty();
+                    }
+                }
+            }
+        }
+
+        public class LootEntryDurability
+        {
+            [JsonProperty("Minimum Durability")]
+            public int MinDurability = 100;
+
+            [JsonProperty("Maximum Durability")]
+            public int MaxDurability = 100;
+        }
+
+        #region Attachment System
+        /* 
+            Added v4.1.1
+        */
+        public class ItemEntrySettings
+        {
+            // Should add deserialzier value to set min / max bounds (min <= max ALWAYS)
+            public class AmmoSettings  // default state
+            {
+                [JsonIgnore]
+                public bool CanHoldMultipleAmmoUnits = true; // Should be set to false when its a single shot weapon (no magazine. Also declares to not serialize the ItemMods list)
+
+                [JsonProperty("Ammo Item Shortname")]
+                public string AmmoItemShortname = string.Empty;  // Item shortname of ammo item
+
+                [JsonIgnore]
+                public int MaxAmmo; // Maximum ammo the item can take.
+
+                // These should only be added in config if the weapon can hold more than 1 unit of ammunition. (e.g harpoon gun vs ak)
+                [JsonProperty("Minimum Amount")]
+                public int Min;
+                [JsonProperty("Maximum Amount")]
+                public int Max;
+
+                // These should only exist if the weapon can only hold 1 unit of ammo
+                [JsonProperty("Spawn Probability")]
+                public double Probability;
+
+                // conditional serialization
+                public bool ShouldSerializeMin() => CanHoldMultipleAmmoUnits;
+                public bool ShouldSerializeMax() => CanHoldMultipleAmmoUnits;
+                public bool ShouldSerializeProbability() => !CanHoldMultipleAmmoUnits;
+            }
+
+            // A weapon always needs ammo
+            [JsonProperty("Ammunition Settings")]
+            public AmmoSettings AmmunitionSettings = new AmmoSettings();
+
+            #region Attachment Related
+            #region Internal
+            [JsonIgnore]
+            public int maxMods; // Maximum amount of mods the item can have.
+            [JsonIgnore]
+            private List<double> _culminativeProbabilities = new List<double>();
+            #endregion
+            public class ItemModEntry
+            {
+                [JsonProperty("Spawn Probability (0%-100%)")]  // Culminative probabilty with other items in list. => Implement loot groups like system
+                public double Probability;
+                [JsonProperty("Durability", NullValueHandling = NullValueHandling.Ignore)]
+                public LootEntryDurability? Durability;
+            }
+
+            public class ItemModSettings
+            {
+                [JsonProperty("Minimum Mod Amount")]
+                public int minModAmount = 1;
+                [JsonProperty("Maximum Mod Amount")]
+                public int maxModAmount = 1;
+                [JsonProperty("Available Attachments")]
+                public Dictionary<string, ItemModEntry> itemMods = new Dictionary<string, ItemModEntry>();
+            }
+
+            // Should only be on weapons that have slots for weapon mods
+            [JsonProperty("Weapon Attachments", NullValueHandling = NullValueHandling.Ignore)]
+            public ItemModSettings? AttachmentSettings; // Item mods / weapon attachments. Null by default. Item shortname: {probabilty, {durability}}
+
+            public void BalanceItemModProbabilities()
+            {
+                if (!(AttachmentSettings?.itemMods?.Count > 0) || maxMods is 0)
+                    return;
+
+                AttachmentSettings.maxModAmount = Math.Clamp(AttachmentSettings.maxModAmount, 1, maxMods);
+
+                double GetSum() => AttachmentSettings.itemMods.Sum(x => x.Value.Probability);
+                double Round(double x) => Math.Round(x, 2);
+
+                const double target = 100;
+                double sum = GetSum(); // Initial sum
+
+                if (sum > target) // Only balance if greater than target
+                {
+                    if (_config.Loot.EnableBonusItemsAutoBalanceLogging)
+                        Log($"- Bonus items probability sum ({sum}) > 100. Balancing list!");
+
+                    double _ratio = target / sum;
+
+                    string largestKey = AttachmentSettings.itemMods.Keys.First();
+                    double largestValue = AttachmentSettings.itemMods[largestKey].Probability;
+
+                    foreach (var item in AttachmentSettings.itemMods)
+                    {
+                        double probability = item.Value.Probability;
+                        if (probability > largestValue)
+                        {
+                            largestValue = probability;
+                            largestKey = item.Key;
+                        }
+
+                        item.Value.Probability = Round(probability * _ratio);
+                    }
+
+                    var largestEntry = AttachmentSettings.itemMods[largestKey];
+                    largestEntry.Probability = Round(largestEntry.Probability - Round(target - GetSum()));
+                }
+            }
+
+            public void UpdateProbabilities()
+            {
+                double _culminative = 0;
+                foreach (var item in AttachmentSettings.itemMods.Values)
+                {
+                    _culminative += item.Probability;
+                    _culminativeProbabilities.Add(_culminative);
+                }
+            }
+
+            // Get random attachment from list
+            public Item? GetRandomItemMod()
+            {
+                if (_culminativeProbabilities.Count == 0)
+                    UpdateProbabilities();
+
+                double randomSelect = RNG.NextDouble() * 1e2;
+                int itemIndex = _culminativeProbabilities.BinarySearch(randomSelect);
+
+                if (itemIndex < 0)
+                    itemIndex = ~itemIndex;
+
+                // No item found
+                if (itemIndex >= AttachmentSettings.itemMods.Count)
+                    return null;
+
+                var entry = AttachmentSettings.itemMods.ElementAt(itemIndex);
+
+                // Create Item
+                Item item = ItemManager.CreateByName(entry.Key);
+
+                // Dont need to send network update, it will be sent with OnVirginSpawn()
+                if (item is null)
+                {
+                    Log($"ERROR: item \"{entry.Key}\" could not be created! System returned null entry!");
+                    return null;
+                }
+
+                if (entry.Value.Durability is not null)
+                    item.ChangeConditionPercentage(GetRNG(entry.Value.Durability.MinDurability, entry.Value.Durability.MaxDurability));
+
+                item.OnVirginSpawn();
+
+                return item;
+            }
+            #endregion
+        }
+        #endregion
+
+        public class LootEntry : LootEntrySettings
+        {
+            // Set at top level class to foce only having bonus items at this level and not nested levels.
+            [JsonProperty("Bonus Items", Order = 7)] // Forcing field to bottom
+            public Dictionary<string, LootEntrySettings> additionalItems = new Dictionary<string, LootEntrySettings>();
+            [JsonProperty("Allow Duplicates")]
+            public bool allowDuplicates = true;
+
+            public LootEntry(int Min, int Max)
+            {
+                this.Min = Min;
+                this.Max = Max;
+            }
+
+            public void CreateBonusItems(ref List<ItemConvertInfo>? bonusItems)
+            {
+                if (!(additionalItems?.Count > 0))
+                    return;
+
+                if (bonusItems is null)
+                    bonusItems = new List<ItemConvertInfo>();
+
+                foreach (var bonusItemEntry in additionalItems)
+                {
+                    var _bonusItemEntry = bonusItemEntry.Value;
+                    Item bonusItem = ItemManager.CreateByName(UniqueTagREGEX.Replace(bonusItemEntry.Key, string.Empty), GetRNG(_bonusItemEntry.Min, _bonusItemEntry.Max) * _config.Loot.LootMultiplier, _bonusItemEntry.SkinId);
+                    
+                    if (bonusItem is null)
+                        continue;
+                    
+                    _bonusItemEntry.ApplyAllProperties(bonusItem);
+
+                    bonusItem.OnVirginSpawn();
+                    bonusItems.Add(new ItemConvertInfo(bonusItem, _bonusItemEntry.CanConvertToBlueprint ?? false));
+                }
+            }
+        }
+        #endregion
+        #endregion
+
+        #region Util
+        private static void Log(string msg, params object[] args) => _instance?.Puts(msg, args);
+        private void SendMessage(BasePlayer player, string message, params object[] args) => Player.Reply(player, message, _config.ChatConfig.Prefix, _config.ChatConfig.MessageIcon, args);
+        public static int GetRNG(int min, int max) => min == max ? min : UnityEngine.Random.Range(Math.Min(min, max), Math.Max(min, max) + 1);
+        public static float GetRNG(float min, float max) => min == max ? min : UnityEngine.Random.Range(Math.Min(min, max), Math.Max(min, max));
+
+        public static int GetWeightedRNG(int min, int max, double weight)
+        {
+            if (min >= max)
+                return min;
+
+            weight = Math.Clamp(weight, 0d, 1d);
+            double value = RNG.NextDouble();
+            double adjusted;
+
+            if (weight < 0.5d)
+            {
+                double t = 1d - (weight / 0.5d);
+                double exponent = 1d + t * 4d;
+                adjusted = Math.Pow(value, exponent);
+            }
+            else if (weight > 0.5d)
+            {
+                double t = (weight - 0.5d) / 0.5d;
+                double exponent = 1d + t * 4d;
+                adjusted = Math.Pow(value, 1d / exponent);
+            }
+            else
+            {
+                adjusted = value;
+            }
+
+            return min + (int)Math.Floor(adjusted * (max - min + 1));
+        }
+        #endregion
+
+        #region Oxide Loot Generation Hooks
+        // Future compatability layer with CustomLootSpawnPlugin
+        private bool IsCustomLootSpawnsContainer(LootFill container)
+        {
+            if (CustomLootSpawns == null)
+                return false;
+
+            var storageContainer = container.StorageContainer;
+            if (storageContainer != null)
+            {
+                object result = CustomLootSpawns.Call("IsLootBox", storageContainer);
+                if (result is bool b && b)
+                    return true;
+            }
+
+            var parentBoat = container.GetComponent<RHIB>();
+            if (parentBoat != null)
+            {
+                object result = CustomLootSpawns.Call("IsLootBox", parentBoat);
+                if (result is bool b && b)
+                    return true;
+            }
+
+            return false;
+        }
+
+        private object OnLootSpawn(LootFill container)
+        {
+            if (!Initialized || container == null || !_config.Generic.WatchedPrefabs.TryGetValue(container.name, out bool enabled) || !enabled || IsCustomLootSpawnsContainer(container))
+                return null;
+
+            if (PopulateContainer(container))
+                return true;
+
+            return null;
+        }
+
+        private object OnLootSpawn(LootContainer container)
+        {
+            if (!Initialized || container == null || !_config.Generic.WatchedPrefabs.TryGetValue(container.PrefabName, out bool enabled) || !enabled || (CustomLootSpawns != null && CustomLootSpawns.Call<bool>("IsLootBox", container)))
+                return null;
+
+            if (PopulateContainer(container))
+                return true;
+
+            return null;
+        }
+
+        LootableCorpse? OnCorpsePopulate(BaseEntity npcPlayer, LootableCorpse corpse)
+            => Initialized && npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.TryGetValue(npcPlayer.PrefabName, out bool enabled) && enabled && PopulateContainer(npcPlayer.PrefabName, corpse) ? corpse : null;
+        #endregion
+
+        #region Loot Methods
+        private int ItemWeight(double baseRarity, int index) => (int)(Math.Pow(baseRarity, 4 - index) * 1000);
+
+        // OPTIMIZE
+        private LootEntry GetAmounts(ItemAmount amount)
+        {
+            LootEntry options = new LootEntry(
+                (int)amount.amount,
+                ((ItemAmountRanged)amount).maxAmount > 0 && ((ItemAmountRanged)amount).maxAmount > amount.amount
+                     ? (int)((ItemAmountRanged)amount).maxAmount
+                     : (int)amount.amount
+            );
+
+            return options;
+        }
+
+        private void GetLootSpawn(LootSpawn lootSpawn, ref Dictionary<string, LootEntry> items)
+        {
+            if (lootSpawn.subSpawn is { Length: > 0 })
+            {
+                foreach (var entry in lootSpawn.subSpawn)
+                    GetLootSpawn(entry.category, ref items);
+            }
+            else if (lootSpawn.items is { Length: > 0 })
+            {
+                foreach (var amount in lootSpawn.items)
+                {
+                    LootEntry options = GetAmounts(amount);
+                    ItemDefinition itemDef = amount.itemDef;
+                    string itemName = itemDef.shortname;
+
+                    if (itemDef.spawnAsBlueprint)
+                        itemName += ".blueprint";
+                    if (!items.ContainsKey(itemName))
+                    {
+                        // Is fireable weapon type
+                        GameObject? entMod = itemDef.GetComponent<ItemModEntity>()?.entityPrefab?.Get();
+                        if (entMod is not null && (entMod.HasComponent<BaseProjectile>() || entMod.HasComponent<LiquidWeapon>()))
+                        {
+                            options.ItemEntryModifications = new ItemEntrySettings();
+
+                            // Allowed to have item mods settings if can have attachments
+                            if (itemDef.GetComponent<ItemModContainer>() is ItemModContainer imc && imc.capacity > 0 && imc.availableSlots.Count > 0)
+                            {
+                                options.ItemEntryModifications.AttachmentSettings = new ItemEntrySettings.ItemModSettings();
+                            }
+                        }
+
+                        items.Add(itemName, options);
+                    }
+                }
+            }
+        }
+
+        private void BuildWeaponInfoCache()
+        {
+            // Build details on all weapons and weapon attachments to build internal loot table flags and options.
+            DurabilityItems = Pool.Get<List<string>>();
+            WeaponInfoCache = Pool.Get<Dictionary<string, WI_Cache>>();
+            WeaponModInfoCache = Pool.Get<Dictionary<string, ItemSlot>>();
+
+            foreach (ItemDefinition itemDef in ItemManager.itemList)
+            {
+                if (itemDef.condition.enabled && itemDef.condition.max > 0)
+                    DurabilityItems.Add(itemDef.shortname);
+
+                // Below scans for weapons only, exit if not in category
+                if (itemDef.category is not ItemCategory.Weapon)
+                    continue;
+
+                var entMod = itemDef.GetComponent<ItemModEntity>()?.entityPrefab?.Get();
+
+                if (entMod is not null && entMod.HasComponent<ProjectileWeaponMod>())
+                {
+                    WeaponModInfoCache[itemDef.shortname] = itemDef.occupySlots;
+                }
+                else
+                {
+                    List<ItemSlot> modTypes = new List<ItemSlot>();
+                    bool isLiquidWeapon = false;
+                    int _maxStackSize = 0;
+                    int maxMods = 0;
+                    int maxAmmo = 0;
+
+                    if (itemDef.GetComponent<ItemModContainer>() is ItemModContainer container)
+                    { // Can take item mods
+                        // Max mods
+                        maxMods = container.capacity;
+
+                        // Mod types
+                        modTypes = container.availableSlots;
+
+                        // Liquid weapon check
+                        if (container.onlyAllowedContents is ItemContainer.ContentsType.Liquid)
+                        {
+                            isLiquidWeapon = true;
+                            _maxStackSize = container.maxStackSize;
+                        }
+                    }
+
+                    // Max ammo
+                    if (entMod is not null && (entMod.HasComponent<BaseProjectile>() || entMod.HasComponent<FlameThrower>() || entMod.HasComponent<LiquidWeapon>()))
+                    {
+                        maxAmmo = _maxStackSize; // only applies to liquid weapon
+
+                        if (entMod.GetComponent<BaseProjectile>() is BaseProjectile bp && bp?.primaryMagazine is BaseProjectile.Magazine magazine)
+                        {
+                            // Safe to reference the built in size as opposed to the capacity, Built in size seems to always have a value.
+                            maxAmmo = magazine.definition.builtInSize;
+                        }
+                        else if (entMod.GetComponent<FlameThrower>() is FlameThrower ft)
+                        {
+                            maxAmmo = ft.maxAmmo;
+                        }
+
+                        ItemSlot totalFlags = modTypes.Count > 0 ? modTypes[0] : ItemSlot.None;
+                        for (int i = 1; i < modTypes.Count; i++)
+                            totalFlags |= modTypes[i];
+
+                        WeaponInfoCache[itemDef.shortname] = new WI_Cache(isLiquidWeapon, maxMods, maxAmmo, totalFlags);
+                    }
+                }
+            }
+        }
+        
+        private void LoadAllContainers()
+        {
+            var nullTablePrefabs = Pool.Get<List<string>>();
+            bool modifiedLootTables = false;
+
+            const string bradleyCrate = "bradley_crate";
+            const string heliCrate = "heli_crate";
+
+            // OPTIMIZE
+            foreach (var lootPrefabEntry in _config.Generic.WatchedPrefabs) // Attempt to generate from prefab path and remove any invalid loot
+            {
+                string lootPrefab = lootPrefabEntry.Key;
+                bool shouldBeEnabled = lootPrefabEntry.Value; // if false it will run and silent fail where it should generate loot, this is to ensure it is valid to the point where it needs to be unless it should be removed from the Watched Prefabs list.
+
+                // If prefab loot table is not currently present loaded from LootTables.json, generate it.
+                if (!lootTables.LootTables.ContainsKey(lootPrefab))
+                {
+                    var basePrefab = GameManager.server.FindPrefab(lootPrefab);
+
+                    if (basePrefab is null)
+                    {
+                        nullTablePrefabs.Add(lootPrefab);
+                        continue;
+                    }
+
+                    #region Loot Helper Functions
+                    void PopulateNPCType(LootContainer.LootSpawnSlot[] spawnSlots)
+                    {
+                        var container = new PrefabLoot();
+
+                        container.Enabled = !lootPrefab.Contains(bradleyCrate, CompareOptions.Ordinal) && !lootPrefab.Contains(heliCrate, CompareOptions.Ordinal);
+                        container.ItemSettings.MaxScrap = 0;
+
+                        var slotItemCount = 0;
+                        var itemList = new Dictionary<string, LootEntry>();
+
+                        foreach (var slot in spawnSlots)
+                        {
+                            GetLootSpawn(slot.definition, ref itemList);
+                            slotItemCount += slot.numberToSpawn;
+                        }
+
+                        container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slotItemCount;
+                        container.ItemSettings.MaxBlueprints = 1;
+                        container.UngroupedItems = itemList;
+
+                        lootTables.LootTables.Add(lootPrefab, container);
+                        modifiedLootTables = true;
+                    }
+
+                    int CountSlots(LootContainer.LootSpawnSlot[] lootSpawnSlots)
+                    {
+                        int slots = 0;
+                        for (int i = 0; i < lootSpawnSlots.Length; i++)
+                            slots += lootSpawnSlots[i].numberToSpawn;
+
+                        return slots;
+                    }
+                    #endregion
+
+
+                    if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc)
+                    { // NPC Version 1
+                        if (shouldBeEnabled)
+                            PopulateNPCType(npc.LootSpawnSlots);
+                    }
+#if OXIDE_PUBLICIZED
+                    else if (basePrefab.TryGetComponent<FSMComponent>(out var fsm) && fsm is Scientist2FSM or Scientist2FSM_Heavy or Scientist2FSM_Shotgun)
+                    {  // NPC Version 2
+                        // Oxide publicizer takes care of this private field.
+                        if (shouldBeEnabled) {
+                            PopulateNPCType(fsm switch
+                            {
+                                Scientist2FSM a => a.dead.LootSpawnSlots,
+                                Scientist2FSM_Heavy b => b.dead.LootSpawnSlots,
+                                Scientist2FSM_Shotgun c => c.dead.LootSpawnSlots
+                            });
+                        }
+                    }
+#endif
+                    else if (basePrefab.GetComponent<LootFill>() is LootFill lf) // Deep Sea Patrol Boats
+                    {
+                        var container = new PrefabLoot();
+                        container.Enabled = true;
+
+                        int slots = 0;
+                        if (lf.LootSpawnSlots.Length > 0)
+                            slots = CountSlots(lf.LootSpawnSlots);
+                        else
+                            slots = lf.MaxDefinitionsToSpawn;
+
+                        container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slots;
+                        container.ItemSettings.MaxBlueprints = 1;
+
+                        var itemList = new Dictionary<string, LootEntry>();
+                        if (lf.LootDefinition is not null)
+                            GetLootSpawn(lf.LootDefinition, ref itemList);
+                        else if (lf.LootSpawnSlots.Length > 0)
+                        {
+                            LootContainer.LootSpawnSlot[] lootSpawnSlots = lf.LootSpawnSlots;
+                            foreach (var lootSpawnSlot in lootSpawnSlots)
+                                GetLootSpawn(lootSpawnSlot.definition, ref itemList);
+                        }
+
+                        // Default items
+                        container.UngroupedItems = itemList;
+
+                        lootTables.LootTables.Add(lootPrefab, container);
+                        modifiedLootTables = true;
+                    }
+                    else
+                    { // is not npc
+                        var loot = basePrefab.GetComponent<LootContainer>();
+
+                        if (loot is null)
+                        {
+                            nullTablePrefabs.Add(lootPrefab);
+                            continue;
+                        }
+
+                        var container = new PrefabLoot();
+
+                        container.Enabled = !lootPrefab.Contains(bradleyCrate, CompareOptions.Ordinal) &&
+                                            !lootPrefab.Contains(heliCrate, CompareOptions.Ordinal);
+                        container.ItemSettings.MinScrap = loot.scrapAmount;
+                        container.ItemSettings.MaxScrap = loot.scrapAmount;
+
+                        int slots = 0;
+                        if (loot.LootSpawnSlots.Length > 0)
+                            slots = CountSlots(loot.LootSpawnSlots);
+                        else
+                            slots = loot.maxDefinitionsToSpawn;
+
+                        container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slots;
+                        container.ItemSettings.MaxBlueprints = 1;
+
+                        var itemList = new Dictionary<string, LootEntry>();
+                        if (loot.lootDefinition is not null)
+                            GetLootSpawn(loot.lootDefinition, ref itemList);
+                        else if (loot.LootSpawnSlots.Length > 0)
+                        {
+                            LootContainer.LootSpawnSlot[] lootSpawnSlots = loot.LootSpawnSlots;
+                            foreach (var lootSpawnSlot in lootSpawnSlots)
+                                GetLootSpawn(lootSpawnSlot.definition, ref itemList);
+                        }
+
+                        // Default items
+                        container.UngroupedItems = itemList;
+
+                        lootTables.LootTables.Add(lootPrefab, container);
+                        modifiedLootTables = true;
+                    }
+                }
+            }
+
+            // Some prefabs are loaded but not used (unloaded or invalid prefab)
+            if (nullTablePrefabs.Count > 0 && _config.Generic.WatchedPrefabs.RemoveAll(nullTablePrefabs.Contains) is int missing && missing > 0)
+            {
+                if (NewConfigGenerated)
+                    Puts($"Removed {missing} invalid / unloaded prefabs from watch list:\n{string.Join(", \n", nullTablePrefabs)}");
+                SaveConfig();
+            }
+
+            Pool.FreeUnmanaged(ref nullTablePrefabs);
+
+            // Write Changes
+            if (modifiedLootTables)
+            {
+                // Try to create an example loot group within the LootTables.json file for user reference :)
+                LootGroupsData.TryCreateExampleGroup();
+                DataSystem.SaveLootTables();
+            }
+            
+            ItemManagerItemNamesList.Capacity = ItemManager.itemList.Count;
+            ItemManagerItemNamesList = ItemManager.itemList.Select(id => id.shortname).ToList();
+            modifiedLootTables = false;
+
+            void scanEntry(string itemKey, LootEntrySettings itemEntry, string lootTableKey, ref bool modificationFlag)
+            {
+                var defName = UniqueTagREGEX.Replace(itemKey, string.Empty);
+                
+                // Warning
+                if (!ItemManagerItemNamesList.Contains(defName, StringComparer.OrdinalIgnoreCase))
+                {
+                    Puts($"Error: Item named \"{defName}\" in table of \"{lootTableKey}\" doesnt exist. Item will not generate! Please check naming!");
+                    return;
+                }
+
+                if (!itemKey.EndsWith(".blueprint", StringComparison.OrdinalIgnoreCase))
+                {
+                    // Validate the blueprint conversion property
+                    bool canBeBlueprint = ItemManager.FindItemDefinition(defName) is { } def && (def.Blueprint?.isResearchable ?? false);
+                    if (itemEntry.CanConvertToBlueprint is null)
+                    {
+                        if (canBeBlueprint)
+                            itemEntry.CanConvertToBlueprint = true;
+                    }
+                    else if (!canBeBlueprint)
+                        itemEntry.CanConvertToBlueprint = null; // Entry should be allowed to have blueprint in first place.
+                }
+                
+                // Check if it needs durability
+                if (DurabilityItems.Contains(itemKey))
+                {
+                    if (itemEntry.DurabilitySettings is null)
+                        itemEntry.DurabilitySettings = new();
+                }
+                else if (itemEntry.DurabilitySettings is not null)
+                    itemEntry.DurabilitySettings = null;
+
+                // Check if we need to scan the current entry.
+                if (!(WeaponInfoCache?.ContainsKey(defName) ?? false))
+                {
+                    // Check if a properties object is set but shouldnt be
+                    if (itemEntry.ItemEntryModifications != null)
+                    {
+                        // This should only happen from a misconfiguration, the plugin should never place an entry in a invalid weapon table.
+                        Log($"{itemKey} from table: \"{lootTableKey}\" should not have a modification object entry, it does not support this!");
+
+                        itemEntry.ItemEntryModifications = null;
+                        modificationFlag = true;
+                    }
+
+                    return;
+                }
+
+                // Modify the flags from cache.
+                WI_Cache WIEntry = WeaponInfoCache[defName]; // Cached entry with static definition data
+                itemEntry.ItemEntryModifications ??= new ItemEntrySettings(); // if does not already exist create it
+
+                // Build entry flags
+                itemEntry.ItemEntryModifications.AmmunitionSettings.MaxAmmo = WIEntry.MaxAmmo;
+                itemEntry.ItemEntryModifications.AmmunitionSettings.CanHoldMultipleAmmoUnits = WIEntry.MaxAmmo > 1;
+                itemEntry.ItemEntryModifications.maxMods = WIEntry.MaxMods;
+
+                // Balance profile
+                itemEntry.ItemEntryModifications.BalanceItemModProbabilities();
+
+                // Scan item mods
+                if (WIEntry.MaxMods > 0 && (itemEntry.ItemEntryModifications.AttachmentSettings ??= !WIEntry.IsLiquidWeapon ? new() : null) is ItemEntrySettings.ItemModSettings itemMods)
+                {
+                    List<string> invalidMods = Pool.Get<List<string>>();
+                    foreach (var modEntry in itemMods.itemMods)
+                    {
+                        // Remove if invalid
+                        if (!WeaponModInfoCache.TryGetValue(modEntry.Key, out ItemSlot modSlotType))
+                        {
+                            Log($"Invalid weapon mod \"{modEntry.Key}\" removed from table: {lootTableKey}");
+                            invalidMods.Add(modEntry.Key);
+                            continue;
+                        }
+
+                        // Check if needs durability
+                        if (modSlotType is ItemSlot.Barrel && modEntry.Value.Durability is not null)
+                            modEntry.Value.Durability = null;
+
+                        // Check if incompatible
+                        if (!WIEntry.ModTypes.HasFlag(modSlotType))
+                        {
+                            Log($"Removed incompatible attachment \"{modEntry.Key}\" assigned to item {itemKey} in table: {lootTableKey}");
+                            invalidMods.Add(modEntry.Key);
+                        }
+                    }
+
+                    if (invalidMods.Count > 0)
+                        itemEntry.ItemEntryModifications.AttachmentSettings.itemMods.RemoveAll(x => invalidMods.Contains(x));
+
+                    Pool.FreeUnmanaged(ref invalidMods);
+
+                }
+                else if (WIEntry.MaxMods is 0 && itemEntry?.ItemEntryModifications?.AttachmentSettings is not null)
+                { // if has mods property but shouldnt.
+                    itemEntry.ItemEntryModifications.AttachmentSettings = null;
+                }
+
+                modificationFlag = true;
+            }
+            
+            // Build entries for loot groups
+            bool modifiedLootGroups = false;
+            foreach (var lootProfile in lootGroups.LootGroups.ToList())
+            {
+                foreach (var entry in lootProfile.Value.ItemList)
+                {
+                    scanEntry(entry.Key, entry.Value.Amount, lootProfile.Key, ref modifiedLootGroups);
+
+                    foreach (var bonusItem in entry.Value.Amount.additionalItems)
+                        scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
+                }
+
+                foreach (var bonusItem in lootProfile.Value.GuaranteedItems)
+                    scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
+            }
+
+            // Build entries for loot tables
+            int activeTypes = 0;
+            foreach (var lootTable in lootTables.LootTables.ToList())
+            {
+                var basePrefab = GameManager.server.FindPrefab(lootTable.Key);
+
+                if (!((basePrefab?.HasComponent<global::HumanNPC>() ?? false) ||  // NPC v1
+                    (basePrefab?.HasComponent<ScientistNPC2>() ?? false) || // NPC v2
+                    (basePrefab?.HasComponent<LootContainer>() ?? false) || // Loot Box
+                    (basePrefab?.HasComponent<LootFill>() ?? false))) // Deep Sea Patrol Boat
+                {
+                    lootTables.LootTables.Remove(lootTable.Key);
+                    Log($"Removed Invalid Loot Table {lootTable.Key}");
+                    modifiedLootTables = true;
+
+                    continue;
+                }
+
+                var container = lootTable.Value;
+
+                #region Sort Available Loot Profile Imports
+                // Sort by RNG
+                container.LootProfiles = container.LootProfiles.OrderBy(x => x.LootProfileProbability).ToList();
+                #endregion
+
+                #region pre-v4 Loot System
+                // This is the original plugin's loot system. It has not been touched aside from integrating loot profiles.
+
+                // Groups items by rarity (weight). Reference: ItemDefinition.Rarity enum
+                Items.Add(lootTable.Key, new List<string>[5]);
+                Blueprints.Add(lootTable.Key, new List<string>[5]);
+
+                for (var i = 0; i < 5; ++i)
+                {
+                    Items[lootTable.Key][i] = new List<string>();
+                    Blueprints[lootTable.Key][i] = new List<string>();
+                }
+
+                // Scan guaranteed items
+                foreach (var itemEntry in container.GuaranteedItems)
+                    scanEntry(itemEntry.Key, itemEntry.Value, lootTable.Key, ref modifiedLootTables);
+
+                // Scan ungrouped items
+                foreach (var itemEntry in container.UngroupedItems)
+                {
+                    #region Entry Internal Flag Mapping
+                    // Scan all items in profile and add internal flags
+                    scanEntry(itemEntry.Key, itemEntry.Value, lootTable.Key, ref modifiedLootTables);
+
+                    if (itemEntry.Value.additionalItems?.Count > 0)
+                        foreach (var bonusItem in itemEntry.Value.additionalItems)
+                            scanEntry(bonusItem.Key, bonusItem.Value, lootTable.Key, ref modifiedLootTables);
+                    #endregion
+
+                    bool isBP = itemEntry.Key.EndsWith(".blueprint", StringComparison.OrdinalIgnoreCase);
+                    var def = ItemManager.FindItemDefinition(UniqueTagREGEX.Replace(itemEntry.Key.Replace(".blueprint", string.Empty), string.Empty));
+
+                    if (def is not null)
+                    {
+                        if (isBP && def.Blueprint is not null && def.Blueprint.isResearchable)
+                        {
+                            itemEntry.Value.CanConvertToBlueprint = null; // This is a manual blueprint entry, nullify the conversion option property
+                            int index = (int)def.rarity;
+                            if (!Blueprints[lootTable.Key][index].Contains(def.shortname))
+                                Blueprints[lootTable.Key][index].Add(def.shortname);
+                        }
+                        else
+                        {
+                            int index = (int)def.rarity;
+                            if (!Items[lootTable.Key][index].Contains(itemEntry.Key))
+                                Items[lootTable.Key][index].Add(itemEntry.Key);
+                        }
+                    }
+                }
+
+                TotalItemWeights.Add(lootTable.Key, 0);
+                TotalBlueprintWeights.Add(lootTable.Key, 0);
+                ItemWeights.Add(lootTable.Key, new int[5]);
+                BlueprintWeights.Add(lootTable.Key, new int[5]);
+
+                for (var i = 0; i < 5; ++i)
+                {
+                    TotalItemWeights[lootTable.Key] += (ItemWeights[lootTable.Key][i] = ItemWeight(BASE_ITEM_RARITY, i) * Items[lootTable.Key][i].Count);
+                    TotalBlueprintWeights[lootTable.Key] += (BlueprintWeights[lootTable.Key][i] = ItemWeight(BASE_ITEM_RARITY, i) * Blueprints[lootTable.Key][i].Count);
+                }
+                #endregion
+            }
+            
+            ItemManagerItemNamesList.Clear();
+
+            if (modifiedLootTables)
+                DataSystem.SaveLootTables();
+
+            if (modifiedLootGroups)
+                DataSystem.SaveLootGroups();
+
+            activeTypes = lootTables.LootTables.Count(table => table.Value.Enabled);
+
+            Log($"Using '{activeTypes}' active of '{lootTables.LootTables.Count}' supported container types");
+        }
+        #endregion
+
+        #region Core
+        // NPC Implementation
+        #region Container Population Boiler
+        private bool PopulateContainer(string prefab, LootableCorpse npc)
+        {
+            if (npc is not { IsDestroyed: false, containers.Length: > 0 } || npc.containers[0] is not { } inventory)
+                return false;
+
+            // API Call
+            if (Interface.CallHook("ShouldBLPopulate_NPC", npc.playerSteamID) != null)
+                return false;
+
+            return PopulateContainer(inventory, prefab);
+        }
+
+        private bool PopulateContainer(LootContainer container)
+        {
+            if (container is null || container.IsDestroyed || Interface.CallHook("ShouldBLPopulate_Container", container.net.ID.Value) != null)
+                return false;
+
+            if (container.inventory is null)
+            {
+                container.CreateInventory(true);
+                container.OnInventoryFirstCreated(container.inventory);
+            }
+
+            return PopulateContainer(container?.inventory, container?.PrefabName);
+        }
+
+        private bool PopulateContainer(LootFill lootFill)
+        {
+            if (lootFill.GetComponent<RHIB>() is not RHIB rHIB || Interface.CallHook("ShouldBLPopulate_Container", rHIB.net.ID) != null)
+                return false;
+
+            if (lootFill.StorageContainer.inventory is null)
+            {
+                lootFill.StorageContainer.CreateInventory(true);
+                lootFill.StorageContainer.OnInventoryFirstCreated(lootFill.StorageContainer.inventory);
+            }
+
+            return PopulateContainer(lootFill.StorageContainer.inventory, rHIB.PrefabName);
+        }
+        #endregion
+
+        private bool PopulateContainer(ItemContainer? container, string? prefab)
+        {
+            // LINQ optimizations here courtesy of Shady14u
+            if (container is null || prefab is null || !(lootTables?.LootTables?.TryGetValue(prefab, out PrefabLoot? con) ?? false) || con is null || !con.Enabled)
+                return false;
+
+            int min = con.ItemSettings.ItemsMin, max = con.ItemSettings.ItemsMax;
+            int minBPs = con.ItemSettings.MinBlueprints, maxBPs = con.ItemSettings.MaxBlueprints;
+
+            int itemCount = Math.Clamp(GetRNG(Math.Min(min, max), Math.Max(min, max)), 1, 36);
+
+            container.capacity = 36;
+            container.Clear();
+
+            // Cache frequently accessed config values to avoid property access in loop
+            bool allowDupes = _config.Loot.AllowDuplicateItems;
+            bool allowGroupDupes = _config.LootGroupsConfig.AllowLootGroupDuplicateItems;
+            bool allowBonusDupes = _config.Loot.AllowBonusItemsDuplicateItems;
+            bool guaranteedItemsCount = con.ItemSettings.guaranteedItemsAddCount;
+            bool lootLockingEnabled = _config.Loot.EnableLootPoolLocking && con.LootPoolLocking;
+            
+            using PooledList<string> itemNames = Pool.Get<PooledList<string>>(); // Current item shortnames
+            if (itemNames.Capacity < itemCount)
+                itemNames.Capacity = itemCount;
+
+            using PooledList<ItemConvertInfo> items = Pool.Get<PooledList<ItemConvertInfo>>();
+            if (items.Capacity < itemCount + 5) // +5 for guaranteed items buffer
+                items.Capacity = itemCount + 5;
+
+            using PooledList<int> itemBlueprints = Pool.Get<PooledList<int>>();
+            if (itemBlueprints.Capacity < maxBPs)
+                itemBlueprints.Capacity = maxBPs;
+
+            using PooledList<KeyValuePair<string, LootEntrySettings>> guaranteedItemEntries = Pool.Get<PooledList<KeyValuePair<string, LootEntrySettings>>>();
+            using PooledHashSet<string> currentItemEntries = Pool.Get<PooledHashSet<string>>(); // Current unique item entry tags (for duplicate generation checking)
+
+            guaranteedItemEntries.AddRange(con.GuaranteedItems);
+            
+            // Attempt to select initial profile for LPL
+            LootProfile? lockedProfile = null;
+            if (lootLockingEnabled)
+                lockedProfile = con.GetRandomProfile(prefab); // Loot pool locking sets an initial profile, if none was set a profile will be selected every time pulling items from either a group or 'null group' (pulling from ungrouped items)
+            
+            int maxRetry = 10;
+            
+            for (int i = guaranteedItemsCount ? guaranteedItemEntries.Count : 0; i < itemCount; ++i)
+            {
+                ItemConvertInfo? itemInfo = null;
+                List<ItemConvertInfo>? bonusItems = null;
+                
+                // Internal buffer of items that will be added to the container's items at end of generation iteration
+                List<KeyValuePair<string, LootEntrySettings>> _guaranteedItemEntries = 
+                    Pool.Get<List<KeyValuePair<string, LootEntrySettings>>>();
+                bool isLootGroupItem = false;
+             
+                void profileSelect(LootProfile lootProfile)
+                {
+                    // Generate if profile is being selected for the first time.
+                    if (!lootProfile.DoProbabilitiesExist)
+                        lootProfile.UpdateProbabilities(lootProfile.ItemList.Select(x => x.Value.Probability));
+
+                    // Attempt to get item from selected profile.
+                    (itemInfo, bonusItems) = lootProfile.GetItem(currentItemEntries);
+
+                    if (itemInfo != null)
+                    {
+                        // Add all guaranteed items from profile (if profile selected use all items regardless)
+                        _guaranteedItemEntries.AddRange(lootProfile.GuaranteedItems);
+                        isLootGroupItem = true;
+                    }
+                } 
+                
+                try
+                {
+                    if (lockedProfile is not null) // Loot Pool Locking
+                    {
+                        profileSelect(lockedProfile);
+                    } else // Normal System
+                    {
+                        #region Attempt Loot Import Select
+                        if (!lootLockingEnabled && con.GetRandomProfile(prefab) is {} profile)
+                            profileSelect(profile);
+                        #endregion
+                        
+                        // Used if LPL is enabled but no profile import was used (selecting ungrouped profile as the locked profile)
+                        #region Ungrouped Items Select
+                        // Loot import not used, generate from ungrouped items with default rng system
+                        if (itemInfo == null)
+                        {
+                            if (con.IgnoreRarityBias) 
+                                (itemInfo, bonusItems) = UngroupedFlatSelect(con, currentItemEntries, itemBlueprints.Count >= con.ItemSettings.MaxBlueprints);
+                            else
+                                (itemInfo, bonusItems) = MightyRNG(con, currentItemEntries, prefab, itemCount, itemBlueprints.Count >= con.ItemSettings.MaxBlueprints);
+                        }
+                        #endregion
+                    }
+                    
+                }
+                catch (Exception e)
+                {
+                    Puts($"[ERROR]: Failed to generate item for \"{prefab}\". Reason: {e.Message} \n{e.StackTrace}");
+                }
+                
+                // No item was generated from either system, attempt to regenerate.
+                if (itemInfo == null)
+                {
+                    if (--maxRetry <= 0)
+                        break;
+
+                    --i;
+                    continue;
+                }
+
+                // Duplicate checking
+                bool IsDuplicate(Item item, bool bonusItem) =>
+                    ((isLootGroupItem && !allowGroupDupes) || (bonusItem && !allowBonusDupes) ||
+                     (!bonusItem && !allowDupes)) && ((itemNames.Contains(item.info.shortname) ||
+                                                       (item.IsBlueprint() &&
+                                                        itemBlueprints.Contains(item.blueprintTarget))));
+
+                if (IsDuplicate(itemInfo.Item, false))
+                {
+                    itemInfo.Item.Remove();
+                    if (--maxRetry <= 0)
+                        break;
+
+                    --i;
+                    continue;
+                }
+
+                if (itemInfo.Item.IsBlueprint())
+                {
+                    itemBlueprints.Add(itemInfo.Item.blueprintTarget);
+                }
+                else
+                {
+                    itemNames.Add(itemInfo.Item.info.shortname);
+                }
+
+                if (storedBlacklist.ItemList.Contains(itemInfo.Item.info.shortname))
+                {
+                    itemInfo.Item.Remove(); // broken item fix
+                    continue;
+                }
+
+                items.Add(itemInfo);
+
+                //Only if bonus items are present
+                if (bonusItems is not null)
+                {
+                    foreach (ItemConvertInfo bonusItem in bonusItems)
+                    {
+                        if (IsDuplicate(bonusItem.Item, true))
+                            bonusItem.Item.Remove();
+                        else
+                        {
+                            items.Add(bonusItem);
+
+                            if (con.ItemSettings.bonusItemsAddCount && ++i >= itemCount)
+                                break;
+                        }
+                    }
+                }
+
+                if (guaranteedItemsCount)
+                {
+                    int t = Math.Min(itemCount - i, _guaranteedItemEntries.Count);
+                    guaranteedItemEntries.AddRange(_guaranteedItemEntries.Take(t));
+                    if ((i += t) >= itemCount)
+                        break;
+                }
+                else
+                {
+                    guaranteedItemEntries.AddRange(_guaranteedItemEntries);
+                }
+
+                Pool.FreeUnmanaged(ref _guaranteedItemEntries);
+            }
+
+            guaranteedItemEntries.Shuffle((uint)GetRNG(0, 100));
+            foreach (var gItemEntry in guaranteedItemEntries)
+            {
+                // Spawn item. No rng, just spawn em.
+                Item gItem = ItemManager.CreateByName(UniqueTagREGEX.Replace(gItemEntry.Key, string.Empty), GetRNG(gItemEntry.Value.Min, gItemEntry.Value.Max), gItemEntry.Value.SkinId);
+                
+                if (gItem is null)
+                    continue;
+
+                gItemEntry.Value.ApplyAllProperties(gItem);
+                
+                items.Add(new (gItem, gItemEntry.Value.CanConvertToBlueprint ?? false));
+            }
+
+            int scrapAmt = 0;
+            if (con.ItemSettings.MinScrap > con.ItemSettings.MaxScrap)
+            { // Lower max to min
+                scrapAmt = con.ItemSettings.MinScrap;
+                con.ItemSettings.MaxScrap = con.ItemSettings.MinScrap;
+            }
+            else if (con.ItemSettings.MaxScrap > con.ItemSettings.MinScrap)
+            {
+                scrapAmt = GetRNG(con.ItemSettings.MinScrap, con.ItemSettings.MaxScrap);
+            }
+            else
+            {
+                scrapAmt = con.ItemSettings.MaxScrap;
+            }
+
+            // Add scrap
+            if (scrapAmt > 0)
+                items.Add(new (ItemManager.CreateByItemID(-932201673, scrapAmt * _config.Loot.ScrapMultiplier), false)); // Scrap item ID
+
+            // Blueprint conversion pass
+            if (_config.Loot.EnableBlueprintConversion && con.ItemSettings.MaxBlueprints > 0)
+            {
+                int currentBPCount = itemBlueprints.Count;
+
+                if (currentBPCount < maxBPs)
+                {
+                    int targetBPCount = GetWeightedRNG(minBPs, maxBPs, _config.Generic.BlueprintWeight);
+                    
+                    if (currentBPCount < targetBPCount)
+                    {
+                        if (BlueprintBaseDef is not null)
+                        {
+                            using PooledList<int> eligibleItemIndices = Pool.Get<PooledList<int>>();
+                            for (int i = 0; i < items.Count; i++)
+                            {
+                                ItemConvertInfo itemEntry = items[i];
+                                if (itemEntry == null || itemEntry.Item.IsBlueprint())
+                                    continue;
+
+                                ItemDefinition def = itemEntry.Item.info;
+                                if (def?.Blueprint is null || !def.Blueprint.isResearchable)
+                                    continue;
+                                
+                                // Tracked from upper item generation system
+                                if (itemEntry.CanBeBp)
+                                    eligibleItemIndices.Add(i);
+                            }
+
+                            while (currentBPCount < targetBPCount && eligibleItemIndices.Count > 0)
+                            {
+                                int randomIdx = GetRNG(0, eligibleItemIndices.Count - 1);
+                                int itemIdx = eligibleItemIndices[randomIdx];
+                                ItemConvertInfo originalItem = items[itemIdx];
+
+                                int blueprintTarget = originalItem.Item.info.itemid;
+
+                                bool hasDuplicateBP = !_config.Loot.AllowDuplicateBlueprints && itemBlueprints.Contains(blueprintTarget);
+                                if (hasDuplicateBP)
+                                {
+                                    eligibleItemIndices.RemoveAt(randomIdx);
+                                    continue;
+                                }
+
+                                Item blueprint = ItemManager.Create(BlueprintBaseDef);
+                                blueprint.blueprintTarget = blueprintTarget;
+
+                                originalItem.Item.Remove();
+                                items[itemIdx] = new ItemConvertInfo(blueprint, false);
+                                itemBlueprints.Add(blueprintTarget);
+
+                                currentBPCount++;
+                                eligibleItemIndices.RemoveAt(randomIdx);
+                            }
+                        }
+                    }
+                }
+            }
+
+            items.Shuffle((uint)UnityEngine.Random.Range(0, 100));
+            foreach (var item in items.Where(entry => entry is not null && entry.Item.IsValid()))
+                if (!item.Item.MoveToContainer(container)) // broken item fix / fixes full container
+                    item.Item.DoRemove();
+
+            container.capacity = container.itemList.Count;
+            container.MarkDirty();
+
+            return true;
+        }
+
+        private void UpdateInternals(bool doLog)
+        {
+            if (Changed)
+            {
+                SaveConfig();
+                Changed = false;
+            }
+
+            if (doLog)
+                Log("Updating internals ...");
+
+            int populatedContainers = 0;
+
+            // Pre kill crate markers to avoid spam.
+            var crates = Pool.Get<PooledList<HackableLockedCrate>>();
+            crates.AddRange(BaseNetworkable.serverEntities.OfType<HackableLockedCrate>().Where(c => c is { IsDestroyed: false, mapMarkerInstance: { IsDestroyed: false } }));
+            foreach (var crate in crates)
+                crate.mapMarkerInstance.Kill();
+
+            bool APICheck(BaseEntity entity)
+                => CustomLootSpawns is not null && CustomLootSpawns.Call<bool>("IsLootBox", entity);
+            
+            NextTick(() =>
+            {
+                if (_config.Generic.RemoveStackedContainers)
+                    FixLoot();
+
+                foreach (var container in BaseNetworkable.serverEntities.Where(e => e is LootContainer or RHIB))
+                {
+                    // API Check
+                    if (container is LootContainer lootContainer && !APICheck((BaseEntity)container) && PopulateContainer(lootContainer))
+                        populatedContainers++;
+                    else if (container.GetComponent<LootFill>() is { } lf && !APICheck((BaseEntity)container) && PopulateContainer(lf))
+                        populatedContainers++;
+                }
+
+                if (doLog)
+                    Log($"Populated ({populatedContainers}) supported loot containers.");
+
+                Initialized = true;
+                populatedContainers = 0;
+
+                // Add crate markers back to those that had it
+                foreach (var crate in crates)
+                    if (crate is { IsDestroyed: false })
+                        crate.CreateMapMarker(120);
+
+                if (crates.Count > 0)
+                    Puts($"Restored {crates.Count} crate markers.");
+
+                // Manual pool free since we get detached
+                Pool.Free(ref crates);
+            });
+        }
+
+        private void FixLoot()
+        {
+            var spawns = Resources.FindObjectsOfTypeAll<LootContainer>()
+                .Where(c => c.isActiveAndEnabled)
+                .OrderBy(c => c.transform.position.x).ThenBy(c => c.transform.position.z)
+                .ToList();
+
+            var count = spawns.Count;
+            var racelimit = count * count;
+
+            var antirace = 0;
+            var deleted = 0;
+
+            for (var i = 0; i < count; i++)
+            {
+                var box = spawns[i];
+                var pos = new Vector2(box.transform.position.x, box.transform.position.z);
+
+                if (++antirace > racelimit)
+                    return;
+
+                var next = i + 1;
+                while (next < count)
+                {
+                    var box2 = spawns[next];
+                    var pos2 = new Vector2(box2.transform.position.x, box2.transform.position.z);
+                    var distance = Vector2.Distance(pos, pos2);
+
+                    if (++antirace > racelimit)
+                        return;
+
+                    if (distance < 0.25f)
+                    {
+                        spawns.RemoveAt(next);
+                        count--;
+
+                        if (box2 is BaseEntity _box2 && !_box2.IsDestroyed)
+                        {
+                            _box2.KillMessage();
+                            deleted++;
+                        }
+                    }
+                    else
+                        break;
+                }
+            }
+
+            if (deleted > 0)
+                Log($"Removed {deleted} stacked LootContainer");
+            else
+                Log($"No stacked LootContainer found.");
+        }
+
+        // Mighty RNG but without the rarity bias for item selection. Random entry is selected within the list's index.
+        private (ItemConvertInfo? item, List<ItemConvertInfo>? bonusItems) UngroupedFlatSelect(PrefabLoot entry, HashSet<string> currentItemEntries, bool blockBPs = false)
+        {
+            bool asBP = RNG.NextDouble() < _config.Generic.BlueprintWeight && !blockBPs;
+            if (entry.UngroupedItems.Where(x => !(currentItemEntries.Contains(x.Key) && !x.Value.allowDuplicates) && x.Key.EndsWith(".blueprint", StringComparison.OrdinalIgnoreCase) == asBP).ToArray() is not [_, ..] availableEntries)
+                return default;
+
+            var selectedEntry = availableEntries[RNG.Next(availableEntries.Length)];
+            var lootEntry = selectedEntry.Value;
+            
+            string itemShortname = UniqueTagREGEX.Replace(selectedEntry.Key, string.Empty).Replace(".blueprint", string.Empty, StringComparison.OrdinalIgnoreCase); // Remove tag
+
+            List<ItemConvertInfo>? bonusItems = null;
+            ItemDefinition itemDef = ItemManager.FindItemDefinition(itemShortname);
+            
+            // Explicit failsafe, caught in outer call.
+            if (itemDef is null)
+                throw new Exception($"Error: invalid shortname {itemShortname}. Should not happen, contact developer.");
+            
+            Item item;
+            if (asBP && itemDef.Blueprint is not null && itemDef.Blueprint.isResearchable)
+            {
+                item = ItemManager.Create(BlueprintBaseDef);
+                item.blueprintTarget = itemDef.itemid;
+            } else
+            {
+                item = ItemManager.Create(itemDef);
+            }
+            
+            if (item is null)
+                return default;
+
+            #region Apply custom properties
+            item.amount = GetRNG(lootEntry.Min, lootEntry.Max) * _config.Loot.LootMultiplier;
+            item.skin = lootEntry.SkinId;
+
+            lootEntry.ApplyAllProperties(item);
+            #endregion
+            
+            lootEntry.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
+            
+            // Add for future duplicate checking.
+            currentItemEntries.Add(selectedEntry.Key);
+            
+            item.OnVirginSpawn();
+            return (new ItemConvertInfo(item, lootEntry.CanConvertToBlueprint ?? false), bonusItems);
+        }
+        
+        /// <summary>
+        /// Select an entry from the specified loot table using the ingame rarity system as the bias / weight for selection.
+        /// </summary>
+        /// <param name="entry">Loot table entry</param>
+        /// <param name="currentItemEntries">List of currently generated items' shortnames</param>
+        /// <param name="type">Prefab name</param>
+        /// <param name="itemCount"></param>
+        /// <param name="blockBPs"></param>
+        /// <returns>Random item and its bonus item list if applicable.</returns>
+        private (ItemConvertInfo? item, List<ItemConvertInfo>? bonusItem) MightyRNG(PrefabLoot entry, HashSet<string> currentItemEntries, string type, int itemCount, bool blockBPs = false)
+        {
+            List<string>? selectFrom = Pool.Get<List<string>>();
+            List<ItemConvertInfo>? bonusItems = null;
+            LootEntry? lootEntry = null;
+            Item? item;
+
+            bool asBP = RNG.NextDouble() < _config.Generic.BlueprintWeight && !blockBPs;
+            string itemEntryName = string.Empty;
+            int maxRetry = 10 * itemCount;
+            int limit = 0;
+
+            // TODO change duplicate regen to O(1) nudge to next or previous neighbour
+            do
+            {
+                // Repool
+                if (selectFrom.Count > 0)
+                {
+                    Pool.FreeUnmanaged(ref selectFrom);
+                    selectFrom = Pool.Get<List<string>>();
+                }
+
+                item = null;
+                
+                var weightList = Pool.Get<List<int>>();
+                var prefabList = Pool.Get<List<List<string>>>();
+
+                var totalWeight = asBP ? TotalBlueprintWeights[type] : TotalItemWeights[type];
+                weightList.AddRange(asBP ? BlueprintWeights[type] : ItemWeights[type]);
+                prefabList.AddRange(asBP ? Blueprints[type] : Items[type]);
+
+                var r = RNG.Next(totalWeight);
+                for (int i = 0; i < 5; ++i)
+                {
+                    limit += weightList[i];
+                    if (r < limit)
+                    {
+                        selectFrom.AddRange(prefabList[i]);
+                        break;
+                    }
+                }
+
+                Pool.FreeUnmanaged(ref weightList);
+                Pool.FreeUnmanaged(ref prefabList);
+
+                if (selectFrom.Count == 0)
+                {
+                    if (--maxRetry <= 0)
+                        break;
+
+                    continue;
+                }
+
+                // Select item name
+                itemEntryName = selectFrom[RNG.Next(0, selectFrom.Count)];
+
+                if (!entry.UngroupedItems.TryGetValue(itemEntryName + (asBP ? ".blueprint" : string.Empty), out lootEntry) || lootEntry is null)
+                {
+                    Puts($"Cannot get config for item {itemEntryName} in prefab {type} bp: {asBP}");
+                    Pool.FreeUnmanaged(ref selectFrom);
+
+                    return (null, null);
+                }
+                
+                if (!lootEntry.allowDuplicates && currentItemEntries.Contains(itemEntryName))
+                {
+                    // Check if is only possible item to avoid retry if needed
+                    if (entry.UngroupedItems.Count == 1)
+                        return (null, null);
+
+                    if (--maxRetry <= 0)
+                        break;
+
+                    continue;
+                }
+
+                string itemShortname = UniqueTagREGEX.Replace(itemEntryName, string.Empty);  // Remove tag
+                ItemDefinition itemDef = ItemManager.FindItemDefinition(itemShortname);
+
+                if (asBP && itemDef.Blueprint is not null && itemDef.Blueprint.isResearchable)
+                {
+                    item = ItemManager.Create(BlueprintBaseDef);
+                    item.blueprintTarget = itemDef.itemid;
+                }
+                else
+                {
+                    item = ItemManager.Create(itemDef);
+                }
+
+                // Shouldn't happen
+                if (item.info is null)
+                {
+                    if (--maxRetry <= 0)
+                        break;
+
+                    continue;
+                }
+
+                break;
+            } while (true);
+            
+            if (selectFrom is [_, ..])
+                Pool.FreeUnmanaged(ref selectFrom);
+
+            if (item is null)
+                return (null, null);
+
+            if (lootEntry is null)
+            {
+                item.Remove();
+                return (null, null);
+            }
+
+            // Apply custom properties
+            item.amount = GetRNG(lootEntry.Min, lootEntry.Max) * _config.Loot.LootMultiplier;
+            item.skin = lootEntry.SkinId;
+
+            lootEntry.ApplyAllProperties(item);
+            lootEntry.CreateBonusItems(ref bonusItems); // Create bonus items and apply attachments
+
+            // Add for future duplicate checking.
+            currentItemEntries.Add(itemEntryName);
+
+            item.OnVirginSpawn();
+            return (new ItemConvertInfo(item, lootEntry.CanConvertToBlueprint ?? false), bonusItems);
+        }
+
+        
+        private bool ItemExists(string name)
+            => ItemManager.itemList.Any(id => id.shortname.Equals(name,  StringComparison.OrdinalIgnoreCase));
+
+        // API
+        private bool isSupplyDropActive()
+        {
+            if (!lootTables.LootTables.TryGetValue("assets/prefabs/misc/supply drop/supply_drop.prefab", out PrefabLoot? con) || con is null)
+                return false;
+
+            if (con.Enabled)
+                return true;
+
+            return false;
+        }
+        #endregion
+
+        #region Looty API Commands
+        [ChatCommand("looty")]
+        private void LootyConfigDownload(BasePlayer player, string command, string[] args)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, ADMIN_PERM))
+            {
+                SendMessage(player, BLLang("perm"));
+                return;
+            }
+
+            if (args.Length != 1)
+            {
+                SendMessage(player, BLLang("lootycmdformat", player.UserIDString));
+                return;
+            }
+
+            GetLootyAPI(args[0], player);
+        }
+
+        [ConsoleCommand("looty")]
+        private void LootyConfigDownload_Console(Arg arg)
+        {
+            if (!arg.IsRcon)
+            {
+                arg.ReplyWith("Error: Should not execute command outside of RCON.");
+                return;
+            }
+
+            if (arg.Args is not {Length: 1} args)
+            {
+                Puts(BLLang("lootycmdformat"));
+                Puts("Please visit https://looty.cc/betterloot-v4 to create your custom loot configuration!");
+                return;
+            }
+
+            // Send Request
+            GetLootyAPI(args[0].ToString());
+        }
+
+        #region Processing Routine
+        private void GetLootyAPI(string lootyId, BasePlayer? player = null)
+        {
+            // Compatibility between console and chat
+            void Respond(string key)
+            {
+                string _lang = BLLang(key);
+                if (player is not null)
+                    SendMessage(player, _lang);
+                else
+                    Puts(_lang);
+            }
+
+            IEnumerator SendRequest()
+            {
+                using (UnityWebRequest www = UnityWebRequest.Get($"https://looty.cc/api/fetch-loot-table?id={lootyId}"))
+                {
+                    Respond($"Attempting to download configuration: {lootyId}");
+                    yield return www.SendWebRequest();
+
+                    if (www.result is UnityWebRequest.Result.ConnectionError or UnityWebRequest.Result.ProtocolError)
+                    {
+                        long code = www.responseCode;
+                        if (www.result is UnityWebRequest.Result.ProtocolError && (code == 404 || code == 410))
+                            Respond("lootynotfound");
+
+                        Puts($"Error: Could not download request: {www.result} ({code})");
+                    }
+                    else
+                    {
+                        #region API Download + Verification
+                        LootyResponse tableData;
+                        try { 
+                            tableData = JsonConvert.DeserializeObject<LootyResponse>(www.downloadHandler.text);
+
+                            if (tableData.IsUnityNull())
+                            {
+                                Respond("Error: Failed to load data. Aborting...");
+                                yield break;
+                            }
+
+                            // Verification
+                            bool targetMatch = tableData.looty.target.Equals("betterloot", StringComparison.OrdinalIgnoreCase);
+                            bool idMatch = tableData.looty.id.Equals(lootyId, comparisonType: StringComparison.Ordinal);
+                            if (!(idMatch && targetMatch))
+                            {
+                                Puts("Invalid table received! {0} {1} Please contact developer!", !targetMatch ? "Wrong plugin target!" : string.Empty, !idMatch ? "Mismatch in Table ID!" : string.Empty);
+                                yield break;
+                            }
+                        } catch (Exception ex)
+                        {
+                            Log($"Failed to download table \"{lootyId}\"... Reason: {ex.Message}");
+                            yield break;
+                        }
+                        #endregion
+                        
+                        #region File Updates
+                        bool restoreFailsafe = false;
+                        
+                        #region LootTable.json Update
+                        try
+                        {
+                            DataSystem.BakDataFile("LootTables");
+                            
+                            if (lootTables != null) 
+                                lootTables.LootTables = tableData.LootTables;
+                            else
+                                lootTables = new () { LootTables = tableData.LootTables };
+                            
+                            restoreFailsafe = true; // Failsafe flag. Restore on error / fail
+                            DataSystem.SaveLootTables();
+
+                            Respond("Loaded new LootTable successfully!");
+                            restoreFailsafe = false;
+                        }
+                        catch (Exception ex)
+                        {
+                            Respond("Failed to load new LootTables.json data...");
+
+                            if (restoreFailsafe)
+                                DataSystem.BakDataFile("LootTables", true);
+
+                            Log($"Failed to load new LootTables data, please contact developer. Message: \n{ex}");
+                        }
+                        #endregion
+
+                        #region LootGroups.json Update
+                        try {
+                            
+                            if (tableData.LootGroups != null)
+                            {
+                                DataSystem.BakDataFile("LootGroups");
+                                
+                                if (lootGroups != null)
+                                {
+                                    lootGroups.LootGroups = tableData.LootGroups;
+                                }
+                                else
+                                {
+                                    // Data non-existent, create new data and save.
+                                    lootGroups = new() { LootGroups = tableData.LootGroups };
+                                    LootGroupsData.TryCreateExampleGroup();
+                                }
+                                
+                                restoreFailsafe = true;
+                                DataSystem.SaveLootGroups();
+
+                                Respond("Loaded new LootGroups.json successfully");
+                                restoreFailsafe = false;
+                            }
+                        } catch (Exception ex)
+                        {
+                            Respond("LootGroups.json load failed.");
+                            Log($"Failed to load new LootGroups data, please contact developer. Message: \n{ex}");
+                            
+                            if (restoreFailsafe)
+                                DataSystem.BakDataFile("LootGroups", true);
+                            
+                            yield break;
+                        }
+                        
+                        InitLootSystem(true);
+                        #endregion
+                        #endregion
+                    }
+                }
+            }
+
+            ServerMgr.Instance.StartCoroutine(SendRequest());
+        }
+        #endregion
+        #endregion
+
+        #region Commands
+        #region Backup / Restore
+        [ChatCommand("bl-backup")]
+        private void ManualBackupCommand(BasePlayer player)
+            => ManualBackupRestore(player, false);
+
+        [ChatCommand("bl-restore")]
+        private void RestoreBackupCommand(BasePlayer player)
+            => ManualBackupRestore(player, true);
+
+        private void ManualBackupRestore(BasePlayer player, bool restore)
+        {
+            if (!permission.UserHasPermission(player.UserIDString, ADMIN_PERM))
+            {
+                SendMessage(player, BLLang("perm"));
+                return;
+            }
+
+            DataSystem.BakDataFile("LootTables", restore, player);
+        }
+
+        [ConsoleCommand("bl-backup")]
+        private void ManualBackupCommand_Console(Arg arg)
+            => ManualBackupRestore_Console(arg, false);
+
+        [ConsoleCommand("bl-restore")]
+        private void RestoreBackupCommand_Console(Arg arg)
+            => ManualBackupRestore_Console(arg, true);
+
+        private void ManualBackupRestore_Console(Arg arg, bool restore)
+        {
+            if (!arg.IsRcon)
+                return;
+
+            DataSystem.BakDataFile("LootTables", restore);
+        }
+        #endregion
+
+        [ChatCommand("blacklist")]
+        private void CmdChatBlacklistNew(BasePlayer player, string command, string[] args)
+        {
+
+            if (!Initialized)
+            {
+                SendMessage(player, BLLang("initialized"));
+                return;
+            }
+
+            if (!permission.UserHasPermission(player.UserIDString, ADMIN_PERM))
+            {
+                SendMessage(player, BLLang("perm"));
+                return;
+            }
+
+            if (args.Length is 0)
+            {
+                if (storedBlacklist.ItemList.Count is 0)
+                    SendMessage(player, BLLang("none"));
+                else
+                {
+                    string _BLItems = string.Join(", ", storedBlacklist.ItemList);
+                    SendMessage(player, BLLang("blocked", player.UserIDString, _BLItems));
+                }
+
+                return;
+            }
+
+            switch (args[0].ToLower())
+            {
+                case "additem":
+                    if (!ItemExists(args[1]))
+                    {
+                        SendMessage(player, BLLang("notvalid", player.UserIDString, args[1]));
+                        return;
+                    }
+
+                    if (!storedBlacklist.ItemList.Contains(args[1]))
+                    {
+                        storedBlacklist.ItemList.Add(args[1]);
+                        UpdateInternals(false);
+                        SendMessage(player, BLLang("blockedpass", player.UserIDString, args[1]));
+                        DataSystem.SaveBlacklist();
+                        return;
+                    }
+
+                    SendMessage(player, BLLang("blockedtrue", player.UserIDString, args[1]));
+                    break;
+                case "deleteitem":
+                    if (!ItemExists(args[1]))
+                    {
+                        SendMessage(player, BLLang("notvalid", player.UserIDString, args[1]));
+                        return;
+                    }
+
+                    if (storedBlacklist.ItemList.Contains(args[1]))
+                    {
+                        storedBlacklist.ItemList.Remove(args[1]);
+                        UpdateInternals(false);
+                        SendMessage(player, BLLang("unblacklisted", player.UserIDString, args[1]));
+                        DataSystem.SaveBlacklist();
+                        return;
+                    }
+
+                    SendMessage(player, BLLang("blockedfalse", player.UserIDString, args[1]));
+                    break;
+                default:
+                    SendMessage(player, BLLang("syntax"));
+                    break;
+            }
+        }
+        #endregion
+
+        #region Hammer loot cycle
+
+        private void OnMeleeAttack(BasePlayer player, HitInfo c)
+        {
+            if (!_config.Loot.EnableHammerLootCycle || player is null || c is null)
+                return;
+
+            Item item = player.GetActiveItem();
+            if (item is null || item.hasCondition || !player.IsAdmin || !item.ToString().Contains("hammer"))
+                return;
+
+            BaseEntity entity = c.HitEntity;
+            if (entity is null || entity.gameObject is null)
+                return;
+
+            if (entity is LootableCorpse)
+            {
+                _instance.SendMessage(player, "Cannot rotate loot directly on corpse.");
+                return;
+            }
+
+            if (entity.GetComponent<LootContainer>() is not StorageContainer _inv || _inv.inventory is null)
+                return;
+
+            ItemContainer container = _inv.inventory;
+            string panelName = _inv.panelName ?? string.Empty;
+
+            container.capacity = 36; // For viewing purposes
+            if (entity.gameObject.GetComponent<HammerHitLootCycle>() is null)
+                entity.gameObject.AddComponent<HammerHitLootCycle>();
+
+
+            player.inventory.loot.StartLootingEntity(entity, false);
+            player.inventory.loot.AddContainer(container);
+            player.inventory.loot.SendImmediate();
+            player.ClientRPC(RpcTarget.Player("RPC_OpenLootPanel", player), panelName);
+        }
+
+        private class HammerHitLootCycle : FacepunchBehaviour
+        {
+            private bool RestoreCrateFlag;
+            private LootContainer loot;
+
+            private void Awake()
+            {
+                loot = GetComponent<LootContainer>();
+                if (loot is null)
+                {
+                    Destroy(this);
+                    return;
+                }
+
+                if (loot is HackableLockedCrate crate && (!crate.mapMarkerInstance?.IsDestroyed ?? false))
+                {
+                    RestoreCrateFlag = true;
+                    crate.mapMarkerInstance.Kill();
+                    crate.SendNetworkUpdateImmediate();
+                }
+
+                _instance.NextTick(() => InvokeRepeating(Repeater, 0, (float)_config.Loot.HammerLootCycleTime));
+            }
+
+            private void Repeater()
+            {
+                if (!enabled) 
+                    return;
+
+                if (loot is null)
+                {
+                    CancelInvoke(Repeater);
+                    Destroy(this);
+                    return;
+                }
+
+                _instance.PopulateContainer(loot);
+                loot.inventory.capacity = 36; // For viewing purposes
+            }
+
+            private void PlayerStoppedLooting(BasePlayer _)
+            {
+                if (GetComponent<LootContainer>() is LootContainer container)
+                {
+                    container.inventory.capacity = container.inventory.itemList.Count;
+                    container.inventory.MarkDirty();
+                }
+
+                CancelInvoke(Repeater);
+
+                if (RestoreCrateFlag && loot is HackableLockedCrate crate)
+                    crate.CreateMapMarker(120);
+
+                Destroy(this);
+            }
+        }
+        #endregion
+    }
+}
+
+namespace Oxide.Plugins.BetterLootExtensions
+{
+    public static class BetterLootExtensions
+    {
+        public static void ChangeConditionPercentage(this Item item, int conditionPercentage)
+            => item.condition = (conditionPercentage / 100f) * item.maxCondition;
+
+        public static bool ContainsPartial(this List<string> list, string partialString)
+            => list.Any(partialString.Contains);
+        public static bool IsDefault<T>(this T obj)
+            => EqualityComparer<T>.Default.Equals(obj, default);
+        public static int RemoveAll<TKey, TValue>(this IDictionary<TKey, TValue> dict, Func<TKey, bool> predicate)
+        {
+            int removeCount = 0;
+            var keys = dict.Keys.Where(k => predicate(k)).ToList();
+            foreach (var key in keys)
+                if (dict.Remove(key))
+                    removeCount++;
+            return removeCount;
+        }
+    }
+}
