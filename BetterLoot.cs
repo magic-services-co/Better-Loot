@@ -22,7 +22,7 @@ using Oxide.Plugins.BetterLootExtensions;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.2.5")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.3.0")]
     [Description("A light loot container modification system with rarity support | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -41,6 +41,7 @@ namespace Oxide.Plugins
 
         private static Random? RNG;
         private static Regex? UniqueTagREGEX;
+        private const string UNWRAP_PREFIX = "unwrap/";
 
         // Data Instances
         private Dictionary<string, List<string>[]> Items = new Dictionary<string, List<string>[]>(); // Cached Item Data for each container
@@ -243,7 +244,8 @@ namespace Oxide.Plugins
                 "humannpc/underwaterdweller",
                 "ptboat.deepsea",
                 "rhib.deepsea",
-                "cache/food"
+                "cache/food",
+                "assets/prefabs/satellitecrash/crates"
             });
 
             // If does contain, skip
@@ -270,6 +272,20 @@ namespace Oxide.Plugins
                 _config.Generic.WatchedPrefabs.TryAdd(name, NewConfigGenerated || (NewSave && _config.Generic.AutoEnableNewContainers));
             }
 
+            // Presents, crack-open eggs, loot bags, and other ItemModUnwrap-derived items are
+            // inventory items rather than prefabs, so expose them through stable synthetic keys.
+            bool addedUnwrapSource = false;
+            foreach (ItemDefinition itemDefinition in ItemManager.itemList)
+            {
+                if (itemDefinition.GetComponentInChildren<ItemModUnwrap>() is not null &&
+                    _config.Generic.WatchedPrefabs.TryAdd(ToUnwrapKey(itemDefinition),
+                        NewConfigGenerated || (NewSave && _config.Generic.AutoEnableNewContainers)))
+                    addedUnwrapSource = true;
+            }
+
+            if (addedUnwrapSource)
+                Changed = true;
+
             if (NewConfigGenerated)
             {
                 Log("Updated configuration with manifest values.");
@@ -278,6 +294,21 @@ namespace Oxide.Plugins
 
             Pool.FreeUnmanaged(ref negativePartialNames);
             Pool.FreeUnmanaged(ref partialNames);
+        }
+
+        private static string ToUnwrapKey(ItemDefinition itemDefinition)
+            => UNWRAP_PREFIX + itemDefinition.shortname;
+
+        private static bool IsUnwrapKey(string key)
+            => key.StartsWith(UNWRAP_PREFIX, StringComparison.OrdinalIgnoreCase);
+
+        private static ItemModUnwrap? FindUnwrapMod(string key)
+        {
+            if (!IsUnwrapKey(key))
+                return null;
+
+            ItemDefinition? itemDefinition = ItemManager.FindItemDefinition(key.Substring(UNWRAP_PREFIX.Length));
+            return itemDefinition?.GetComponentInChildren<ItemModUnwrap>();
         }
 
         protected override void LoadDefaultConfig() => _config = new PluginConfig();
@@ -394,10 +425,9 @@ namespace Oxide.Plugins
         {
             try
             {
-                CheckWatchedPrefabs(); // Called so OnNewSave can trigger flag
-
                 ItemManager.Initialize();
                 BlueprintBaseDef = ItemManager.FindItemDefinition("blueprintbase");
+                CheckWatchedPrefabs(); // ItemManager must be initialized before unwrap sources can be discovered.
                 BuildWeaponInfoCache();
 
                 permission.RegisterPermission(ADMIN_PERM, this);
@@ -1501,6 +1531,27 @@ namespace Oxide.Plugins
 
         LootableCorpse? OnCorpsePopulate(BaseEntity npcPlayer, LootableCorpse corpse)
             => Initialized && npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.TryGetValue(npcPlayer.PrefabName, out bool enabled) && enabled && PopulateContainer(npcPlayer.PrefabName, corpse) ? corpse : null;
+
+        private object? OnItemUnwrap(Item item, BasePlayer player, ItemModUnwrap itemModUnwrap)
+        {
+            if (!Initialized || item?.info is null || player is null || itemModUnwrap is null)
+                return null;
+
+            string key = ToUnwrapKey(item.info);
+            if (!_config.Generic.WatchedPrefabs.TryGetValue(key, out bool enabled) || !enabled ||
+                !(lootTables?.LootTables?.TryGetValue(key, out PrefabLoot? profile) ?? false) || profile is null || !profile.Enabled)
+                return null;
+
+            if (!PopulateContainer(player.inventory.containerMain, key, false, player.inventory.containerBelt, player, out int deliveredItems) || deliveredItems == 0)
+                return null;
+
+            item.UseItem(1);
+
+            if (itemModUnwrap.successEffect.isValid)
+                Effect.server.Run(itemModUnwrap.successEffect.resourcePath, player.eyes.position, Vector3.zero, null, false);
+
+            return true;
+        }
         #endregion
 
         #region Loot Methods
@@ -1511,24 +1562,55 @@ namespace Oxide.Plugins
         {
             LootEntry options = new LootEntry(
                 (int)amount.amount,
-                ((ItemAmountRanged)amount).maxAmount > 0 && ((ItemAmountRanged)amount).maxAmount > amount.amount
-                     ? (int)((ItemAmountRanged)amount).maxAmount
+                amount is ItemAmountRanged ranged && ranged.maxAmount > 0 && ranged.maxAmount > amount.amount
+                     ? (int)ranged.maxAmount
                      : (int)amount.amount
             );
 
             return options;
         }
 
-        private void GetLootSpawn(LootSpawn lootSpawn, ref Dictionary<string, LootEntry> items)
+        private bool IsSelectableLootEntry(LootSpawn.Entry entry)
+            => entry.category is not null && entry.category.HasAnySpawns() &&
+               (entry.restrictedEras is not { Length: > 0 } || Array.IndexOf(entry.restrictedEras, ConVar.Server.Era) >= 0) &&
+               entry.weight + entry.RuntimeWeightBonus() > 0;
+
+        private HashSet<string> GetGuaranteedLootItems(LootSpawn lootSpawn)
         {
-            if (lootSpawn.subSpawn is { Length: > 0 })
+            LootSpawn.Entry[] selectableEntries = lootSpawn.subSpawn?.Where(IsSelectableLootEntry).ToArray() ?? Array.Empty<LootSpawn.Entry>();
+            if (selectableEntries.Length > 0)
             {
-                foreach (var entry in lootSpawn.subSpawn)
-                    GetLootSpawn(entry.category, ref items);
+                HashSet<string>? commonItems = null;
+                foreach (var entry in selectableEntries)
+                {
+                    HashSet<string> branchItems = GetGuaranteedLootItems(entry.category);
+                    if (commonItems is null)
+                        commonItems = branchItems;
+                    else
+                        commonItems.IntersectWith(branchItems);
+                }
+
+                return commonItems ?? new HashSet<string>();
+            }
+
+            return lootSpawn.items?
+                .Where(x => x?.itemDef is not null && x.itemDef.IsAllowed(Rust.EraRestriction.Loot))
+                .Select(x => x.itemDef.shortname + (x.itemDef.spawnAsBlueprint ? ".blueprint" : string.Empty))
+                .ToHashSet() ?? new HashSet<string>();
+        }
+
+        private void GetLootSpawn(LootSpawn lootSpawn, Dictionary<string, LootEntry> items,
+            Dictionary<string, LootEntrySettings> guaranteedItems, bool guaranteedCall)
+        {
+            LootSpawn.Entry[] selectableEntries = lootSpawn.subSpawn?.Where(IsSelectableLootEntry).ToArray() ?? Array.Empty<LootSpawn.Entry>();
+            if (selectableEntries.Length > 0)
+            {
+                foreach (var entry in selectableEntries)
+                    GetLootSpawn(entry.category, items, guaranteedItems, false);
             }
             else if (lootSpawn.items is { Length: > 0 })
             {
-                foreach (var amount in lootSpawn.items)
+                foreach (var amount in lootSpawn.items.Where(x => x?.itemDef is not null && x.itemDef.IsAllowed(Rust.EraRestriction.Loot)))
                 {
                     LootEntry options = GetAmounts(amount);
                     ItemDefinition itemDef = amount.itemDef;
@@ -1536,7 +1618,7 @@ namespace Oxide.Plugins
 
                     if (itemDef.spawnAsBlueprint)
                         itemName += ".blueprint";
-                    if (!items.ContainsKey(itemName))
+                    if (!items.ContainsKey(itemName) && !guaranteedItems.ContainsKey(itemName))
                     {
                         // Is fireable weapon type
                         GameObject? entMod = itemDef.GetComponent<ItemModEntity>()?.entityPrefab?.Get();
@@ -1554,6 +1636,28 @@ namespace Oxide.Plugins
                         items.Add(itemName, options);
                     }
                 }
+            }
+
+            if (!guaranteedCall)
+                return;
+
+            foreach (string itemName in GetGuaranteedLootItems(lootSpawn))
+            {
+                if (guaranteedItems.ContainsKey(itemName) || !items.TryGetValue(itemName, out LootEntry? options))
+                    continue;
+
+                // Thank you, Nick, for the suggestion for moving these types of items to the guaranteed items list :)
+                items.Remove(itemName);
+                guaranteedItems.Add(itemName, new LootEntrySettings
+                {
+                    SkinId = options.SkinId,
+                    DisplayName = options.DisplayName,
+                    Min = options.Min,
+                    Max = options.Max,
+                    CanConvertToBlueprint = options.CanConvertToBlueprint,
+                    DurabilitySettings = options.DurabilitySettings,
+                    ItemEntryModifications = options.ItemEntryModifications
+                });
             }
         }
 
@@ -1645,6 +1749,40 @@ namespace Oxide.Plugins
                 // If prefab loot table is not currently present loaded from LootTables.json, generate it.
                 if (!lootTables.LootTables.ContainsKey(lootPrefab))
                 {
+                    if (IsUnwrapKey(lootPrefab))
+                    {
+                        if (FindUnwrapMod(lootPrefab) is not { revealList: not null } unwrap)
+                        {
+                            nullTablePrefabs.Add(lootPrefab);
+                            continue;
+                        }
+
+                        var container = new PrefabLoot { Enabled = true };
+                        var itemList = new Dictionary<string, LootEntry>();
+                        var guaranteedItems = new Dictionary<string, LootEntrySettings>();
+                        int minTries = Math.Max(1, Math.Min(unwrap.minTries, unwrap.maxTries));
+                        int maxTries = Math.Max(minTries, Math.Max(unwrap.minTries, unwrap.maxTries));
+
+                        GetLootSpawn(unwrap.revealList, itemList, guaranteedItems, unwrap.minTries > 0);
+                        foreach (LootEntrySettings guaranteedItem in guaranteedItems.Values)
+                        {
+                            guaranteedItem.Min *= minTries;
+                            guaranteedItem.Max *= maxTries;
+                        }
+
+                        container.ItemSettings.ItemsMin = minTries;
+                        container.ItemSettings.ItemsMax = maxTries;
+                        container.ItemSettings.MaxBlueprints = 1;
+                        // Each native unwrap attempt can yield both a guaranteed item and a random branch item.
+                        container.ItemSettings.guaranteedItemsAddCount = false;
+                        container.UngroupedItems = itemList;
+                        container.GuaranteedItems = guaranteedItems;
+
+                        lootTables.LootTables.Add(lootPrefab, container);
+                        modifiedLootTables = true;
+                        continue;
+                    }
+
                     var basePrefab = GameManager.server.FindPrefab(lootPrefab);
 
                     if (basePrefab is null)
@@ -1663,16 +1801,20 @@ namespace Oxide.Plugins
 
                         var slotItemCount = 0;
                         var itemList = new Dictionary<string, LootEntry>();
+                        var guaranteedItems = new Dictionary<string, LootEntrySettings>();
 
                         foreach (var slot in spawnSlots)
                         {
-                            GetLootSpawn(slot.definition, ref itemList);
+                            GetLootSpawn(slot.definition, itemList, guaranteedItems,
+                                slot.numberToSpawn > 0 && slot.probability >= 1f && string.IsNullOrEmpty(slot.onlyWithLoadoutNamed));
                             slotItemCount += slot.numberToSpawn;
                         }
 
                         container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slotItemCount;
                         container.ItemSettings.MaxBlueprints = 1;
+                        container.ItemSettings.guaranteedItemsAddCount = true;
                         container.UngroupedItems = itemList;
+                        container.GuaranteedItems = guaranteedItems;
 
                         lootTables.LootTables.Add(lootPrefab, container);
                         modifiedLootTables = true;
@@ -1687,8 +1829,7 @@ namespace Oxide.Plugins
                         return slots;
                     }
                     #endregion
-
-
+                    
                     if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc)
                     { // NPC Version 1
                         if (shouldBeEnabled)
@@ -1713,27 +1854,32 @@ namespace Oxide.Plugins
                         var container = new PrefabLoot();
                         container.Enabled = true;
 
-                        int slots = 0;
-                        if (lf.LootSpawnSlots.Length > 0)
-                            slots = CountSlots(lf.LootSpawnSlots);
-                        else
-                            slots = lf.MaxDefinitionsToSpawn;
+                        int slots = lf.LootSpawnSlots.Length > 0 ? CountSlots(lf.LootSpawnSlots) : lf.MaxDefinitionsToSpawn;
 
                         container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slots;
                         container.ItemSettings.MaxBlueprints = 1;
+                        container.ItemSettings.guaranteedItemsAddCount = true;
 
                         var itemList = new Dictionary<string, LootEntry>();
-                        if (lf.LootDefinition is not null)
-                            GetLootSpawn(lf.LootDefinition, ref itemList);
-                        else if (lf.LootSpawnSlots.Length > 0)
+                        var guaranteedItems = new Dictionary<string, LootEntrySettings>();
+                        
+                        if (lf.LootSpawnSlots.Length > 0)
                         {
                             LootContainer.LootSpawnSlot[] lootSpawnSlots = lf.LootSpawnSlots;
                             foreach (var lootSpawnSlot in lootSpawnSlots)
-                                GetLootSpawn(lootSpawnSlot.definition, ref itemList);
-                        }
+                            {
+                                if (lootSpawnSlot.eras is { Length: > 0 } && Array.IndexOf(lootSpawnSlot.eras, ConVar.Server.Era) < 0)
+                                    continue;
+
+                                GetLootSpawn(lootSpawnSlot.definition, itemList, guaranteedItems,
+                                    lootSpawnSlot.numberToSpawn > 0 && lootSpawnSlot.probability >= 1f);
+                            }
+                        } else if (lf.LootDefinition is not null)
+                            GetLootSpawn(lf.LootDefinition, itemList, guaranteedItems, lf.MaxDefinitionsToSpawn > 0);
 
                         // Default items
                         container.UngroupedItems = itemList;
+                        container.GuaranteedItems = guaranteedItems;
 
                         lootTables.LootTables.Add(lootPrefab, container);
                         modifiedLootTables = true;
@@ -1755,27 +1901,35 @@ namespace Oxide.Plugins
                         container.ItemSettings.MinScrap = loot.scrapAmount;
                         container.ItemSettings.MaxScrap = loot.scrapAmount;
 
-                        int slots = 0;
-                        if (loot.LootSpawnSlots.Length > 0)
-                            slots = CountSlots(loot.LootSpawnSlots);
-                        else
-                            slots = loot.maxDefinitionsToSpawn;
-
+                        int slots = loot.LootSpawnSlots.Length > 0 ? CountSlots(loot.LootSpawnSlots) : loot.maxDefinitionsToSpawn;
+                        
                         container.ItemSettings.ItemsMin = container.ItemSettings.ItemsMax = slots;
                         container.ItemSettings.MaxBlueprints = 1;
+                        container.ItemSettings.guaranteedItemsAddCount = true;
 
                         var itemList = new Dictionary<string, LootEntry>();
-                        if (loot.lootDefinition is not null)
-                            GetLootSpawn(loot.lootDefinition, ref itemList);
-                        else if (loot.LootSpawnSlots.Length > 0)
+                        var guaranteedItems = new Dictionary<string, LootEntrySettings>();
+                        
+                        if (loot.LootSpawnSlots.Length > 0)
                         {
                             LootContainer.LootSpawnSlot[] lootSpawnSlots = loot.LootSpawnSlots;
                             foreach (var lootSpawnSlot in lootSpawnSlots)
-                                GetLootSpawn(lootSpawnSlot.definition, ref itemList);
+                            {
+                                if (lootSpawnSlot.eras is { Length: > 0 } && Array.IndexOf(lootSpawnSlot.eras, ConVar.Server.Era) < 0)
+                                    continue;
+
+                                GetLootSpawn(lootSpawnSlot.definition, itemList, guaranteedItems,
+                                    lootSpawnSlot.numberToSpawn > 0 && lootSpawnSlot.probability >= 1f);
+                            }
+                        }
+                        else if (loot.lootDefinition is not null)
+                        {
+                            GetLootSpawn(loot.lootDefinition, itemList, guaranteedItems, loot.maxDefinitionsToSpawn > 0);
                         }
 
                         // Default items
                         container.UngroupedItems = itemList;
+                        container.GuaranteedItems = guaranteedItems;
 
                         lootTables.LootTables.Add(lootPrefab, container);
                         modifiedLootTables = true;
@@ -1926,12 +2080,22 @@ namespace Oxide.Plugins
             int activeTypes = 0;
             foreach (var lootTable in lootTables.LootTables.ToList())
             {
-                var basePrefab = GameManager.server.FindPrefab(lootTable.Key);
+                bool validLootSource;
+                if (IsUnwrapKey(lootTable.Key))
+                {
+                    // unwrap/* is an internal table key, never a prefab path.
+                    validLootSource = FindUnwrapMod(lootTable.Key) is { revealList: not null };
+                }
+                else
+                {
+                    var basePrefab = GameManager.server.FindPrefab(lootTable.Key);
+                    validLootSource = (basePrefab?.HasComponent<global::HumanNPC>() ?? false) ||  // NPC v1
+                                      (basePrefab?.HasComponent<ScientistNPC2>() ?? false) || // NPC v2
+                                      (basePrefab?.HasComponent<LootContainer>() ?? false) || // Loot Box
+                                      (basePrefab?.HasComponent<LootFill>() ?? false); // Deep Sea Patrol Boat
+                }
 
-                if (!((basePrefab?.HasComponent<global::HumanNPC>() ?? false) ||  // NPC v1
-                    (basePrefab?.HasComponent<ScientistNPC2>() ?? false) || // NPC v2
-                    (basePrefab?.HasComponent<LootContainer>() ?? false) || // Loot Box
-                    (basePrefab?.HasComponent<LootFill>() ?? false))) // Deep Sea Patrol Boat
+                if (!validLootSource)
                 {
                     lootTables.LootTables.Remove(lootTable.Key);
                     Log($"Removed Invalid Loot Table {lootTable.Key}");
@@ -2069,7 +2233,13 @@ namespace Oxide.Plugins
         #endregion
 
         private bool PopulateContainer(ItemContainer? container, string? prefab)
+            => PopulateContainer(container, prefab, true, null, null, out _);
+
+        private bool PopulateContainer(ItemContainer? container, string? prefab, bool clearContainer,
+            ItemContainer? overflowContainer, BasePlayer? dropOwner, out int deliveredItems)
         {
+            deliveredItems = 0;
+
             // LINQ optimizations here courtesy of Shady14u
             if (container is null || prefab is null || !(lootTables?.LootTables?.TryGetValue(prefab, out PrefabLoot? con) ?? false) || con is null || !con.Enabled)
                 return false;
@@ -2079,8 +2249,11 @@ namespace Oxide.Plugins
 
             int itemCount = Math.Clamp(GetRNG(Math.Min(min, max), Math.Max(min, max)), 1, 36);
 
-            container.capacity = 36;
-            container.Clear();
+            if (clearContainer)
+            {
+                container.capacity = 36;
+                container.Clear();
+            }
 
             // Cache frequently accessed config values to avoid property access in loop
             bool allowDupes = _config.Loot.AllowDuplicateItems;
@@ -2251,7 +2424,24 @@ namespace Oxide.Plugins
             foreach (var gItemEntry in guaranteedItemEntries)
             {
                 // Spawn item. No rng, just spawn em.
-                Item gItem = ItemManager.CreateByName(UniqueTagREGEX.Replace(gItemEntry.Key, string.Empty), GetRNG(gItemEntry.Value.Min, gItemEntry.Value.Max), gItemEntry.Value.SkinId);
+                string itemName = UniqueTagREGEX.Replace(gItemEntry.Key, string.Empty);
+                bool spawnAsBlueprint = itemName.EndsWith(".blueprint", StringComparison.OrdinalIgnoreCase);
+                itemName = itemName.Replace(".blueprint", string.Empty, StringComparison.OrdinalIgnoreCase);
+
+                Item? gItem;
+                if (spawnAsBlueprint && BlueprintBaseDef is not null && ItemManager.FindItemDefinition(itemName) is { } blueprintTarget)
+                {
+                    gItem = ItemManager.Create(BlueprintBaseDef);
+                    if (gItem is not null)
+                    {
+                        gItem.blueprintTarget = blueprintTarget.itemid;
+                        itemBlueprints.Add(blueprintTarget.itemid);
+                    }
+                }
+                else
+                {
+                    gItem = ItemManager.CreateByName(itemName, GetRNG(gItemEntry.Value.Min, gItemEntry.Value.Max), gItemEntry.Value.SkinId);
+                }
                 
                 if (gItem is null)
                     continue;
@@ -2341,11 +2531,28 @@ namespace Oxide.Plugins
 
             items.Shuffle((uint)UnityEngine.Random.Range(0, 100));
             foreach (var item in items.Where(entry => entry is not null && entry.Item.IsValid()))
-                if (!item.Item.MoveToContainer(container)) // broken item fix / fixes full container
+            {
+                if (item.Item.MoveToContainer(container) ||
+                    (overflowContainer is not null && item.Item.MoveToContainer(overflowContainer)))
+                {
+                    deliveredItems++;
+                }
+                else if (dropOwner is not null)
+                {
+                    item.Item.Drop(dropOwner.GetDropPosition(), dropOwner.GetDropVelocity(), default);
+                    deliveredItems++;
+                }
+                else
+                {
                     item.Item.DoRemove();
+                }
+            }
 
-            container.capacity = container.itemList.Count;
+            if (clearContainer)
+                container.capacity = container.itemList.Count;
+
             container.MarkDirty();
+            overflowContainer?.MarkDirty();
 
             return true;
         }
