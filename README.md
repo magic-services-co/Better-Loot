@@ -26,6 +26,13 @@ Add or remove an item from the blacklist to block it from being added to NPC or 
 - **Usage** — `/blacklist <additem | deleteitem> "item shortname"`
 - **Permission** — `BetterLoot.admin`
 
+### Map Pings (Chat)
+Ping nearby ore nodes or collectables on your map for 30 seconds. Only the closest 48 are shown so Rust’s ping UI does not flood the client.
+- **Usage** — `/blshow <ore | collectables | all>`
+- **Aliases** — `/betterlootshow`, `/oreshow` (same as `/blshow all`)
+- **Clear** — `/blhide` (`/orehide` still works)
+- **Permission** — `BetterLoot.admin` or `BetterLoot.oreshow`
+
 ### Backup / Restore
 Manual commands to back up or restore edited files. Backups are also created automatically when using the Looty API command.
 
@@ -98,6 +105,7 @@ Manual commands to back up or restore edited files. Backups are also created aut
 - `oxide/config/BetterLoot.json` — Global plugin settings.
 - `oxide/data/BetterLoot/LootGroups.json` — Custom loot group data.
 - `oxide/data/BetterLoot/LootTables.json` — Individual prefab loot table data.
+- `oxide/data/BetterLoot/GatherRates.json` — Individual prefab Gather Rate data.
 - `oxide/data/BetterLoot/Blacklist.json` — Disabled item shortnames.
 
 ## Developer API
