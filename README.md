@@ -21,6 +21,11 @@ After creating or converting a loot table on [Looty](https://looty.cc/betterloot
 - **Permission** — `BetterLoot.admin`
 
 ## Commands & Tools
+### Help Command (Chat)
+Display a ingame help chat message and in-game command usage.
+- **Usage** - `/blhelp`
+- **Permission** - `BetterLoot.admin` or `BetterLoot.oreshow`
+
 ### Blacklist (Chat)
 Add or remove an item from the blacklist to block it from being added to NPC or loot container inventories.
 - **Usage** — `/blacklist <additem | deleteitem> "item shortname"`
