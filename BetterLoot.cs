@@ -29,7 +29,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-        [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.0")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.1")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -1421,7 +1421,7 @@ namespace Oxide.Plugins
             }
             catch (Exception ex)
             {
-                Puts($"Error initializing plugin. Please ensure you configuration and data files are corrent and that you have used the looty editor to confirm. EX: \n{ex.Message}");
+                Puts($"Error initializing plugin. Please ensure you configuration and data files are current and that you have used the looty editor to confirm. EX: \n{ex.Message}");
                 Server.Command($"o.unload {Name}");
             }
         }
@@ -1926,7 +1926,7 @@ namespace Oxide.Plugins
         {
             Log("--------------------------------------------------------------------------");
             Log("Use the Looty Editor to easily edit and create loot tables for BetterLoot!");
-            Log("Find it here -> https://looty.cc/betterloot-v4");
+            Log("Find it here -> https://looty.cc/betterloot");
             Log("--------------------------------------------------------------------------");
         }
         #endregion
@@ -1995,6 +1995,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Item Properties", NullValueHandling = NullValueHandling.Ignore)]
             public ItemEntrySettings? ItemEntryModifications;
+
+            [JsonIgnore]
+            public LootEntrySettings? AppliedProperties;
 
             public bool ShouldSerializeAllowDuplicates() => AllowDuplicates == false;
             public bool ShouldSerializeSkinId() => SkinId != 0;
@@ -2451,6 +2454,9 @@ namespace Oxide.Plugins
 
             [JsonProperty("Can Convert To Blueprint", NullValueHandling = NullValueHandling.Ignore)]
             public bool? CanConvertToBlueprint;
+
+            [JsonProperty("Included in Vanilla Loot", DefaultValueHandling = DefaultValueHandling.Ignore)]
+            public bool IncludedInVanillaLoot;
 
             [JsonProperty("Item Durability", NullValueHandling = NullValueHandling.Ignore)]
             public LootEntryDurability? DurabilitySettings;
@@ -3044,6 +3050,7 @@ namespace Oxide.Plugins
                     Min = options.Min,
                     Max = options.Max,
                     CanConvertToBlueprint = options.CanConvertToBlueprint,
+                    IncludedInVanillaLoot = true,
                     DurabilitySettings = options.DurabilitySettings,
                     ItemEntryModifications = options.ItemEntryModifications,
                     Rarity = options.Rarity
@@ -3278,30 +3285,6 @@ namespace Oxide.Plugins
             return true;
         }
 
-        private void ApplyVanillaLootItemProperties(VanillaLootItem entry, string itemName, Item created)
-        {
-            if (entry is null || created is null)
-                return;
-
-            var apply = new LootEntrySettings
-            {
-                DisplayName = entry.DisplayName,
-                DurabilitySettings = entry.DurabilitySettings,
-                ItemEntryModifications = entry.ItemEntryModifications
-            };
-
-            if (apply.ItemEntryModifications is not null && WeaponInfoCache is not null && WeaponInfoCache.TryGetValue(itemName, out WI_Cache wi))
-            {
-                apply.ItemEntryModifications.AmmunitionSettings ??= new ItemEntrySettings.AmmoSettings();
-                apply.ItemEntryModifications.AmmunitionSettings.MaxAmmo = wi.MaxAmmo;
-                apply.ItemEntryModifications.AmmunitionSettings.CanHoldMultipleAmmoUnits = wi.MaxAmmo > 1;
-                apply.ItemEntryModifications.maxMods = wi.MaxMods;
-                apply.ItemEntryModifications.BalanceItemModProbabilities();
-            }
-
-            apply.ApplyAllProperties(created);
-        }
-
         private void SpawnSavedVanillaNode(VanillaLootNode? node, ItemContainer dest)
         {
             if (node is null)
@@ -3379,7 +3362,7 @@ namespace Oxide.Plugins
                         if (item.SkinId != 0)
                             created.skin = item.SkinId;
 
-                        ApplyVanillaLootItemProperties(item, itemName, created);
+                        item.AppliedProperties?.ApplyAllProperties(created);
 
                         created.OnVirginSpawn();
                         if (!created.MoveToContainer(dest))
@@ -3775,6 +3758,12 @@ namespace Oxide.Plugins
                 else if (itemEntry.DurabilitySettings is not null)
                     itemEntry.DurabilitySettings = null;
 
+                scanWeaponEntry(itemKey, defName, itemEntry, lootTableKey, ref modificationFlag);
+            }
+
+            void scanWeaponEntry(string itemKey, string defName, LootEntrySettings itemEntry, string lootTableKey,
+                ref bool modificationFlag, bool addAttachments = true)
+            {
                 // Check if we need to scan the current entry.
                 if (!(WeaponInfoCache?.ContainsKey(defName) ?? false))
                 {
@@ -3804,7 +3793,7 @@ namespace Oxide.Plugins
                 itemEntry.ItemEntryModifications.BalanceItemModProbabilities();
 
                 // Scan item mods
-                if (WIEntry.MaxMods > 0 && (itemEntry.ItemEntryModifications.AttachmentSettings ??= !WIEntry.IsLiquidWeapon ? new() : null) is ItemEntrySettings.ItemModSettings itemMods)
+                if (WIEntry.MaxMods > 0 && (itemEntry.ItemEntryModifications.AttachmentSettings ??= addAttachments && !WIEntry.IsLiquidWeapon ? new() : null) is ItemEntrySettings.ItemModSettings itemMods)
                 {
                     List<string> invalidMods = Pool.Get<List<string>>();
                     foreach (var modEntry in itemMods.itemMods)
@@ -3843,6 +3832,44 @@ namespace Oxide.Plugins
                 modificationFlag = true;
             }
             
+            void scanVanillaNode(VanillaLootNode? node, string lootTableKey, ref bool modificationFlag)
+            {
+                if (node is null)
+                    return;
+
+                if (node.Items is not null)
+                {
+                    foreach (var item in node.Items)
+                    {
+                        item.AppliedProperties = null;
+                        if (string.IsNullOrWhiteSpace(item.Shortname) ||
+                            (string.IsNullOrWhiteSpace(item.DisplayName) && item.DurabilitySettings is null && item.ItemEntryModifications is null))
+                            continue;
+
+                        var properties = new LootEntrySettings
+                        {
+                            DisplayName = item.DisplayName,
+                            DurabilitySettings = item.DurabilitySettings,
+                            ItemEntryModifications = item.ItemEntryModifications
+                        };
+
+                        if (properties.ItemEntryModifications is not null)
+                        {
+                            string defName = UniqueTagREGEX.Replace(item.Shortname, string.Empty);
+                            properties.ItemEntryModifications.AmmunitionSettings ??= new ItemEntrySettings.AmmoSettings();
+                            scanWeaponEntry(item.Shortname, defName, properties, lootTableKey, ref modificationFlag, false);
+                            item.ItemEntryModifications = properties.ItemEntryModifications;
+                        }
+
+                        item.AppliedProperties = properties;
+                    }
+                }
+
+                if (node.SubSpawn is not null)
+                    foreach (var child in node.SubSpawn)
+                        scanVanillaNode(child, lootTableKey, ref modificationFlag);
+            }
+
             // Build entries for loot groups
             bool modifiedLootGroups = false;
             foreach (var lootProfile in lootGroups.LootGroups.ToList())
@@ -3910,6 +3937,10 @@ namespace Oxide.Plugins
                     Items[lootTable.Key][i] = new List<string>();
                     Blueprints[lootTable.Key][i] = new List<string>();
                 }
+
+                if (container.VanillaLootSlots is not null)
+                    foreach (var slot in container.VanillaLootSlots)
+                        scanVanillaNode(slot.Loot, lootTable.Key, ref modifiedLootTables);
 
                 // Scan guaranteed items
                 foreach (var itemEntry in container.GuaranteedItems)
@@ -4179,6 +4210,9 @@ namespace Oxide.Plugins
 
             foreach (var gItemEntry in con.GuaranteedItems)
             {
+                if (gItemEntry.Value.IncludedInVanillaLoot)
+                    continue;
+
                 string itemName = StripUniqueTag(gItemEntry.Key);
                 bool spawnAsBlueprint = itemName.EndsWith(".blueprint", StringComparison.OrdinalIgnoreCase);
                 itemName = itemName.Replace(".blueprint", string.Empty, StringComparison.OrdinalIgnoreCase);
@@ -4285,11 +4319,68 @@ namespace Oxide.Plugins
                 container.Clear();
             }
 
-            if (con.UseVanillaLootRng &&
-                (TrySpawnSavedVanillaLoot(con, container) || TryPopulateVanillaRustLoot(container, prefab, vanillaLootSource)))
+            if (con.UseVanillaLootRng)
             {
-                ApplyVanillaLootOverlays(container, overflowContainer, dropOwner, con, clearContainer, out deliveredItems);
-                return true;
+                ItemContainer vanillaContainer = container;
+                if (!clearContainer)
+                {
+                    vanillaContainer = new ItemContainer();
+                    vanillaContainer.ServerInitialize(null, 1);
+                    vanillaContainer.containerVolume = int.MaxValue;
+                    vanillaContainer.GiveUID();
+                    vanillaContainer.onItemAddedRemoved = (reward, added) =>
+                    {
+                        if (added && reward.parent is not null)
+                            reward.parent.capacity = reward.parent.itemList.Count + 1;
+                    };
+                }
+
+                try
+                {
+                    if (TrySpawnSavedVanillaLoot(con, vanillaContainer) || TryPopulateVanillaRustLoot(vanillaContainer, prefab, vanillaLootSource))
+                    {
+                        ApplyVanillaLootOverlays(vanillaContainer, clearContainer ? overflowContainer : null,
+                            clearContainer ? dropOwner : null, con, clearContainer, out deliveredItems);
+                        if (!clearContainer)
+                        {
+                            deliveredItems = 0;
+                            using PooledList<Item> rewards = Pool.Get<PooledList<Item>>();
+                            rewards.AddRange(vanillaContainer.itemList);
+                            foreach (Item reward in rewards)
+                            {
+                                if (reward is null || !reward.IsValid())
+                                    continue;
+
+                                int amount = reward.amount;
+                                if (reward.MoveToContainer(container) ||
+                                    (overflowContainer is not null && reward.MoveToContainer(overflowContainer)))
+                                    deliveredItems++;
+                                else
+                                {
+                                    bool partiallyDelivered = reward.amount < amount;
+                                    if (dropOwner is not null && reward.Drop(dropOwner.GetDropPosition(), dropOwner.GetDropVelocity(), default) is not null)
+                                        deliveredItems++;
+                                    else
+                                    {
+                                        if (partiallyDelivered)
+                                            deliveredItems++;
+                                        reward.DoRemove();
+                                    }
+                                }
+                            }
+
+                            container.MarkDirty();
+                            overflowContainer?.MarkDirty();
+                        }
+
+                        return true;
+                    }
+                }
+                finally
+                {
+                    if (!clearContainer)
+                        vanillaContainer.Kill();
+                }
             }
 
             // Cache frequently accessed config values to avoid property access in loop
@@ -4996,7 +5087,7 @@ namespace Oxide.Plugins
             if (arg.Args is not {Length: 1} args)
             {
                 Puts(BLLang("lootycmdformat"));
-                Puts("Please visit https://looty.cc/betterloot-v4 to create your custom loot configuration!");
+                Puts("Please visit https://looty.cc/betterloot to create your custom loot configuration!");
                 return;
             }
 
@@ -6037,7 +6128,7 @@ namespace Oxide.Plugins
 
             if (!IsOreSystemEnabled())
             {
-                Puts("Ore spawning is disabled. Turn on Custom spawning for a node or collectable in the Looty Gather → Ore tab.");
+                Puts("Ore spawning is disabled. Turn on Custom spawning for a node or collectable in the Looty Editor in the Gather → Ore tab.");
                 UpdateOreHookSubscriptions();
                 return;
             }
@@ -6094,6 +6185,9 @@ namespace Oxide.Plugins
 
         private void RestartOreSpawnSystem()
         {
+            _npcHarvestHitCache.Clear();
+            _npcHarvestMissCache.Clear();
+            SpawnHandler_SpawnRepeating_Patch.ResetTracking();
             EnsureQuarryHarvestDefaults();
             StopSpawning();
             if (IsOreSystemEnabled())
@@ -6109,7 +6203,7 @@ namespace Oxide.Plugins
                     CleanupSpawnedOres();
                 _oreSystemStarted = false;
                 UpdateOreHookSubscriptions();
-                Puts("Ore spawning disabled. Reload BetterLoot to restore vanilla ore populations if Harmony patches were applied.");
+                Puts("Ore spawning disabled. Native resource spawning is no longer suppressed.");
             }
         }
 
@@ -6230,7 +6324,7 @@ namespace Oxide.Plugins
                 Unsubscribe(nameof(OnCollectiblePickup));
             }
 
-            if (HasAnyCollectableEnabled() || HasAnyCollectableBonusLoot() || HasAnyCollectablePickupOverride() || HasAnyNpcHarvestOverride())
+            if (HasAnyCollectableEnabled() || HasAnyCollectableBonusLoot() || HasAnyCollectablePickupOverride() || HasAnyNpcHarvestOverride() || HasAnyNodeGatherOverride())
             {
                 Subscribe(nameof(OnEntityKill));
             }
@@ -6611,6 +6705,9 @@ namespace Oxide.Plugins
                 }
 
                 var oreType = (OreType)saved.Type;
+                if (!IsResourceCustomEnabled(oreType))
+                    continue;
+
                 var position = new Vector3(saved.X, saved.Y, saved.Z);
                 position.y = TerrainMeta.HeightMap.GetHeight(position);
 
@@ -6709,10 +6806,16 @@ namespace Oxide.Plugins
         [ChatCommand("blhelp")]
         private void CmdBlHelp(BasePlayer player, string command, string[] args)
         {
+            if (!HasOrePermission(player, ORE_PERM_SHOW))
+            {
+                PrintToChat(player, "You don't have permission to use this command.");
+                return;
+            }
+            
             var sb = Pool.Get<StringBuilder>();
             sb.Clear();
             sb.AppendLine("=== <color=#4d94ff>BetterLoot Ore Commands</color> ===");
-            sb.AppendLine("Configure ores and collectables in the Looty editor Ores tab, then deploy with looty.");
+            sb.AppendLine("Configure ores and collectables in the Looty editor Ores tab, then deploy with the Looty command.");
             sb.AppendLine("<color=#ffb347>/blshow ore</color> - Ping nearby ore nodes on your map for 30 seconds.");
             sb.AppendLine("<color=#ffb347>/blshow collectables</color> - Ping nearby collectables on your map for 30 seconds.");
             sb.AppendLine("<color=#ffb347>/betterlootshow</color> - Same as /blshow.");
@@ -7151,7 +7254,8 @@ namespace Oxide.Plugins
 
             private static bool Prefix(SpawnPopulationBase population, SpawnDistribution distribution)
             {
-                if (_instance == null || !_instance.Ore.DisableNativeSpawning || population is null)
+                if (_instance == null || !_instance.Ore.DisableNativeSpawning || population is null ||
+                    (!_instance.Ore.PerResourceSpawning && !_instance.Ore.Enabled))
                     return true;
 
                 var popName = population.name;
@@ -7365,6 +7469,7 @@ namespace Oxide.Plugins
 
             NextTick(() =>
             {
+                if (!Ore.DisableNativeSpawning || !Ore.PerResourceSpawning) return;
                 if (worldEntity is null || worldEntity.IsDestroyed) return;
                 if (spawnedOres.ContainsKey(worldEntity)) return;
                 if (!IsNativeManagedEntity(worldEntity)) return;
@@ -7747,6 +7852,13 @@ namespace Oxide.Plugins
                 if (inferred.HasValue && IsNodeType(inferred.Value))
                 {
                     var settings = GetOreTypeSettings(inferred.Value);
+                    if (settings is { OverrideGatherAmounts: true, GatherOutputs: { Count: > 0 } })
+                    {
+                        var nativeData = new OreNodeData(inferred.Value, entity.transform.position, default(TerrainBiome.Enum), 1f, entity.PrefabName);
+                        if (ApplyGatherOverride(dispenser, player, item, nativeData, settings, isBonus))
+                            return FinishOwnedDispenserHit(player, item, isBonus);
+                    }
+
                     var scale = GetConfiguredGatherMultiplier(settings);
                     if (Mathf.Abs(scale - 1f) > 0.0001f)
                     {
@@ -8146,6 +8258,10 @@ namespace Oxide.Plugins
 
         private void TryRespawnResource(OreNodeData oreData, OreTypeSettings settings)
         {
+            if ((!Ore.PerResourceSpawning && !Ore.Enabled) || !settings.Enabled ||
+                !ReferenceEquals(settings, GetOreTypeSettings(oreData.Type)))
+                return;
+
             var maxOffset = settings.GridSize * 0.4f;
             var basePos = oreData.Position;
 
@@ -8264,7 +8380,7 @@ namespace Oxide.Plugins
                 if (spawnCoroutine != null)
                     PrintToChat(player, $"Plugin {label} are still spawning. Try again in a moment.");
                 else if (!IsOreSystemEnabled())
-                    PrintToChat(player, "Custom spawning is off. Enable it on a node or collectable in the Looty Ores tab, then deploy with looty.");
+                    PrintToChat(player, "Custom spawning is off. Enable it on a node or collectable in the Looty Editor via the Ores tab, then deploy with the Looty command.");
                 else
                     PrintToChat(player, $"No plugin-spawned {label} found.");
                 activeShowCoroutines.Remove(userId);
