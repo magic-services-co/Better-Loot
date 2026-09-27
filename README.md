@@ -11,10 +11,10 @@ You can watch his amazing up to date tutorial -> [right here](https://www.youtub
 Old loot table files are **not compatiable** with V4, to convert them go to [looty.cc/converter](https://looty.cc/converter), upload your existing `LootTables.json` (found in `oxide/data/BetterLoot/`). All future updates will be automatically converted by the plugin.
 
 ## Web Configuration
-Use [looty.cc/betterloot-v4](https://looty.cc/betterloot-v4) to easily edit, Loot tables, Loot groups, item rng, skins, attachments and more
+Use [looty.cc/betterloot](https://looty.cc/betterloot) to easily edit, Loot tables, Loot groups, item rng, skins, attachments and more
 
 ### Automatic Upload to your Server
-After creating or converting a loot table on [Looty](https://looty.cc/betterloot-v4):
+After creating or converting a loot table on [Looty](https://looty.cc/betterloot):
 1. Press **[Download]** and then **[Download via Command]** to generate your unique loot table ID.
 2. Copy the command shown and paste it into either RCON or Chat.
 - **Usage** — `/looty {looty-id}`
@@ -68,7 +68,7 @@ Manual commands to back up or restore edited files. Backups are also created aut
   When enabled, admins can use a hammer to hit a valid entity and open its loot panel, which will keep updating until closed - great for testing loot generation.
 
 - **Loot Multiplier**  
-  General multiplier for loot inside containers (more detailed settings available on [Looty](https://looty.cc/betterloot-v4)).
+  General multiplier for loot inside containers (more detailed settings available on [Looty](https://looty.cc/betterloot)).
 
 - **Scrap Multiplier**  
   Basic multiplier for scrap inside containers.
