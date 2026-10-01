@@ -29,7 +29,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.1")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.2")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -4328,7 +4328,7 @@ namespace Oxide.Plugins
                     vanillaContainer.ServerInitialize(null, 1);
                     vanillaContainer.containerVolume = int.MaxValue;
                     vanillaContainer.GiveUID();
-                    vanillaContainer.onItemAddedRemoved = (reward, added) =>
+                    vanillaContainer.onItemAddedRemoved = (reward, added, _) =>
                     {
                         if (added && reward.parent is not null)
                             reward.parent.capacity = reward.parent.itemList.Count + 1;
