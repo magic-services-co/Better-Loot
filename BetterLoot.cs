@@ -29,7 +29,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.2")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.3")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -112,10 +112,32 @@ namespace Oxide.Plugins
             },
             new[]
             {
+                "assets/rust.ai/agents/bull/bull.prefab",
+                "assets/rust.ai/agents/bull/bull.entity.prefab",
+                "assets/rust.ai/agents/bull/bull.corpse.prefab",
+                "assets/rust.ai/agents/livestock/bull.prefab",
+                "assets/rust.ai/agents/livestock/bull.entity.prefab",
+                "assets/rust.ai/agents/livestock/bull.corpse.prefab",
+                "assets/rust.ai/agents/cattle/bull.prefab",
+                "assets/rust.ai/agents/cattle/bull.corpse.prefab"
+            },
+            new[]
+            {
                 "assets/rust.ai/agents/chicken/chicken.prefab",
                 "assets/rust.ai/agents/chicken/chicken.corpse.prefab",
                 "assets/rust.ai/agents/chicken/chicken.corpse.tutorial.prefab",
                 "assets/rust.ai/agents/chicken/chicken.tutorial.prefab"
+            },
+            new[]
+            {
+                "assets/rust.ai/agents/cow/cow.prefab",
+                "assets/rust.ai/agents/cow/cow.entity.prefab",
+                "assets/rust.ai/agents/cow/cow.corpse.prefab",
+                "assets/rust.ai/agents/livestock/cow.prefab",
+                "assets/rust.ai/agents/livestock/cow.entity.prefab",
+                "assets/rust.ai/agents/livestock/cow.corpse.prefab",
+                "assets/rust.ai/agents/cattle/cow.prefab",
+                "assets/rust.ai/agents/cattle/cow.corpse.prefab"
             },
             new[]
             {
@@ -136,6 +158,17 @@ namespace Oxide.Plugins
             {
                 "assets/rust.ai/agents/fish/simpleshark.prefab",
                 "assets/rust.ai/agents/fish/shark.corpse.prefab"
+            },
+            new[]
+            {
+                "assets/rust.ai/agents/sheep/sheep.prefab",
+                "assets/rust.ai/agents/sheep/sheep.entity.prefab",
+                "assets/rust.ai/agents/sheep/sheep.corpse.prefab",
+                "assets/rust.ai/agents/livestock/sheep.prefab",
+                "assets/rust.ai/agents/livestock/sheep.entity.prefab",
+                "assets/rust.ai/agents/livestock/sheep.corpse.prefab",
+                "assets/rust.ai/agents/cattle/sheep.prefab",
+                "assets/rust.ai/agents/cattle/sheep.corpse.prefab"
             },
             new[]
             {
@@ -357,6 +390,9 @@ namespace Oxide.Plugins
         private const string QUARRY_STONE_KEY = "Stone Quarry";
         private const string QUARRY_SULFUR_KEY = "Sulfur Quarry";
         private const string QUARRY_EXCAVATOR_KEY = "Giant Excavator";
+        private const string LIVESTOCK_COW_PREFAB = "assets/rust.ai/agents/cow/cow.prefab";
+        private const string LIVESTOCK_BULL_PREFAB = "assets/rust.ai/agents/bull/bull.prefab";
+        private const string LIVESTOCK_SHEEP_PREFAB = "assets/rust.ai/agents/sheep/sheep.prefab";
         #endregion
 
         #region Lang
@@ -589,6 +625,8 @@ namespace Oxide.Plugins
             public Dictionary<string, NpcHarvestSettings> NpcHarvest = new Dictionary<string, NpcHarvestSettings>(StringComparer.OrdinalIgnoreCase);
             [JsonProperty("Quarry Harvest")]
             public Dictionary<string, QuarryHarvestSettings> QuarryHarvest = new Dictionary<string, QuarryHarvestSettings>(StringComparer.OrdinalIgnoreCase);
+            [JsonProperty("Livestock Production")]
+            public Dictionary<string, LivestockProductionSettings> LivestockProduction = new Dictionary<string, LivestockProductionSettings>(StringComparer.OrdinalIgnoreCase);
 
             private static OreTypeSettings WithGather(OreTypeSettings settings, params OreGatherOutput[] outputs)
             {
@@ -909,6 +947,98 @@ namespace Oxide.Plugins
             public string Shortname = string.Empty;
             [JsonProperty("Amount")]
             public int Amount;
+        }
+
+        public class LivestockGeneProduction
+        {
+            [JsonProperty("Milk Amount")]
+            public int MilkAmount = 1;
+            [JsonProperty("Milk Cooldown Seconds")]
+            public float MilkCooldownSeconds = 300f;
+            [JsonProperty("Wool Amount")]
+            public int WoolAmount = 10;
+            [JsonProperty("Wool Cooldown Seconds")]
+            public float WoolCooldownSeconds = 300f;
+            [JsonProperty("Dung Amount")]
+            public int DungAmount = 1;
+            [JsonProperty("Dung Interval Seconds")]
+            public float DungIntervalSeconds = 600f;
+        }
+
+        public class LivestockProductionSettings
+        {
+            [JsonProperty("Override Production")]
+            public bool OverrideProduction;
+            [JsonProperty("Milk Amount")]
+            public int MilkAmount = 1;
+            [JsonProperty("Milk Cooldown Seconds")]
+            public float MilkCooldownSeconds = 300f;
+            [JsonProperty("Wool Amount")]
+            public int WoolAmount = 10;
+            [JsonProperty("Wool Cooldown Seconds")]
+            public float WoolCooldownSeconds = 300f;
+            [JsonProperty("Dung Amount")]
+            public int DungAmount = 1;
+            [JsonProperty("Dung Interval Seconds")]
+            public float DungIntervalSeconds = 600f;
+            [JsonProperty("Bad")]
+            public LivestockGeneProduction Bad;
+            [JsonProperty("Ok")]
+            public LivestockGeneProduction Ok;
+            [JsonProperty("Good")]
+            public LivestockGeneProduction Good;
+
+            public bool ShouldSerializeMilkAmount() => Bad == null;
+            public bool ShouldSerializeMilkCooldownSeconds() => Bad == null;
+            public bool ShouldSerializeWoolAmount() => Bad == null;
+            public bool ShouldSerializeWoolCooldownSeconds() => Bad == null;
+            public bool ShouldSerializeDungAmount() => Bad == null;
+            public bool ShouldSerializeDungIntervalSeconds() => Bad == null;
+
+            public static LivestockGeneProduction VanillaTier(LivestockGeneTier tier)
+            {
+                if (tier == LivestockGeneTier.Bad)
+                    return new LivestockGeneProduction { MilkAmount = 1, MilkCooldownSeconds = 500f, WoolAmount = 6, WoolCooldownSeconds = 500f, DungAmount = 1, DungIntervalSeconds = 1000f };
+                if (tier == LivestockGeneTier.Good)
+                    return new LivestockGeneProduction { MilkAmount = 2, MilkCooldownSeconds = 187f, WoolAmount = 16, WoolCooldownSeconds = 187f, DungAmount = 1, DungIntervalSeconds = 375f };
+                return new LivestockGeneProduction { MilkAmount = 1, MilkCooldownSeconds = 300f, WoolAmount = 10, WoolCooldownSeconds = 300f, DungAmount = 1, DungIntervalSeconds = 600f };
+            }
+
+            public void EnsureGeneTiers()
+            {
+                if (Bad != null && Ok != null && Good != null) return;
+                bool customMilkAmount = MilkAmount != 1;
+                bool customMilkTime = Math.Abs(MilkCooldownSeconds - 300f) > 0.5f;
+                bool customWoolAmount = WoolAmount != 10;
+                bool customWoolTime = Math.Abs(WoolCooldownSeconds - 300f) > 0.5f;
+                bool customDungAmount = DungAmount != 1;
+                bool customDungTime = Math.Abs(DungIntervalSeconds - 600f) > 0.5f;
+                Bad ??= CopyTier(LivestockGeneTier.Bad, customMilkAmount, customMilkTime, customWoolAmount, customWoolTime, customDungAmount, customDungTime);
+                Ok ??= CopyTier(LivestockGeneTier.Ok, customMilkAmount, customMilkTime, customWoolAmount, customWoolTime, customDungAmount, customDungTime);
+                Good ??= CopyTier(LivestockGeneTier.Good, customMilkAmount, customMilkTime, customWoolAmount, customWoolTime, customDungAmount, customDungTime);
+            }
+
+            public LivestockGeneProduction ForTier(LivestockGeneTier tier)
+            {
+                EnsureGeneTiers();
+                if (tier == LivestockGeneTier.Bad) return Bad;
+                if (tier == LivestockGeneTier.Good) return Good;
+                return Ok;
+            }
+
+            private LivestockGeneProduction CopyTier(LivestockGeneTier tier, bool customMilkAmount, bool customMilkTime, bool customWoolAmount, bool customWoolTime, bool customDungAmount, bool customDungTime)
+            {
+                var vanilla = VanillaTier(tier);
+                return new LivestockGeneProduction
+                {
+                    MilkAmount = customMilkAmount ? MilkAmount : vanilla.MilkAmount,
+                    MilkCooldownSeconds = customMilkTime ? MilkCooldownSeconds : vanilla.MilkCooldownSeconds,
+                    WoolAmount = customWoolAmount ? WoolAmount : vanilla.WoolAmount,
+                    WoolCooldownSeconds = customWoolTime ? WoolCooldownSeconds : vanilla.WoolCooldownSeconds,
+                    DungAmount = customDungAmount ? DungAmount : vanilla.DungAmount,
+                    DungIntervalSeconds = customDungTime ? DungIntervalSeconds : vanilla.DungIntervalSeconds
+                };
+            }
         }
 
         public class OreGatherOutput
@@ -4275,7 +4405,7 @@ namespace Oxide.Plugins
             deliveredItems = container.itemList.Count;
         }
 
-        private void TryFillFromLootProfile(LootProfile lootProfile, string? profileName,
+        private static void TryFillFromLootProfile(LootProfile lootProfile, string? profileName,
             HashSet<string> currentItemEntries, List<KeyValuePair<string, LootEntrySettings>> guaranteedFromProfile,
             ref ItemConvertInfo? itemInfo, ref List<ItemConvertInfo>? bonusItems,
             ref bool isLootGroupItem, ref string? selectedProfileName)
@@ -5517,6 +5647,7 @@ namespace Oxide.Plugins
         {
             public float VanillaStartTotal;
             public readonly Dictionary<string, float> VanillaStartByItem = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            public readonly Dictionary<string, float> VanillaTakenByItem = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             public readonly Dictionary<string, int> GivenByItem = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
             public readonly HashSet<string> ExtraGrantedThisFrame = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
             public int LastFrame = -1;
@@ -5732,30 +5863,19 @@ namespace Oxide.Plugins
                 if (settings == null || string.IsNullOrEmpty(settings.Prefab))
                     continue;
 
+                if (!IsCollectableType(pair.Type))
+                    continue;
+
                 try
                 {
-                    if (IsCollectableType(pair.Type))
-                    {
-                        if (settings.PickupOutputs is { Count: > 0 } && !replaceExistingGather)
-                            continue;
-
-                        var pickups = CapturePickupOutputsFromPrefab(settings.Prefab);
-                        if (pickups.Count == 0)
-                            continue;
-
-                        settings.PickupOutputs = pickups;
-                        changed = true;
-                        continue;
-                    }
-
-                    if (settings.GatherOutputs is { Count: > 0 } && !replaceExistingGather)
+                    if (settings.PickupOutputs is { Count: > 0 } && !replaceExistingGather)
                         continue;
 
-                    var gather = CaptureGatherOutputsFromPrefab(settings.Prefab);
-                    if (gather.Count == 0)
+                    var pickups = CapturePickupOutputsFromPrefab(settings.Prefab);
+                    if (pickups.Count == 0)
                         continue;
 
-                    settings.GatherOutputs = gather;
+                    settings.PickupOutputs = pickups;
                     changed = true;
                 }
                 catch (Exception ex)
@@ -6076,9 +6196,42 @@ namespace Oxide.Plugins
 
                 Ore.QuarryHarvest[pair.Key] = new QuarryHarvestSettings
                 {
-                    OverrideGatherAmounts = existing?.OverrideGatherAmounts ?? false,
+                    OverrideGatherAmounts = existing?.OverrideGatherAmounts ?? true,
                     Outputs = outputs
                 };
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private static LivestockProductionSettings CreateDefaultLivestockProduction()
+        {
+            var settings = new LivestockProductionSettings { OverrideProduction = false };
+            settings.EnsureGeneTiers();
+            return settings;
+        }
+
+        private bool EnsureLivestockProductionDefaults()
+        {
+            bool changed = false;
+            Ore.LivestockProduction = Ore.LivestockProduction == null
+                ? new Dictionary<string, LivestockProductionSettings>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, LivestockProductionSettings>(Ore.LivestockProduction, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var key in new[] { LIVESTOCK_COW_PREFAB, LIVESTOCK_BULL_PREFAB, LIVESTOCK_SHEEP_PREFAB })
+            {
+                if (Ore.LivestockProduction.TryGetValue(key, out var existing) && existing != null)
+                {
+                    if (existing.Bad == null || existing.Ok == null || existing.Good == null)
+                    {
+                        existing.EnsureGeneTiers();
+                        changed = true;
+                    }
+                    continue;
+                }
+
+                Ore.LivestockProduction[key] = CreateDefaultLivestockProduction();
                 changed = true;
             }
 
@@ -6095,18 +6248,25 @@ namespace Oxide.Plugins
             {
                 bool vanillaChanged = PopulateVanillaGatherDefaults(_gatherRatesNeedsVanillaFill);
                 bool quarryChanged = EnsureQuarryHarvestDefaults();
-                if (vanillaChanged || quarryChanged)
+                bool livestockChanged = EnsureLivestockProductionDefaults();
+                if (vanillaChanged || quarryChanged || livestockChanged)
                 {
                     DataSystem.SaveOreSpawn();
-                    if (vanillaChanged)
-                        Log("Loaded vanilla gather, pickup, and harvest amounts from in-game prefabs into GatherRates.json");
-                    if (quarryChanged)
-                        Log("Added quarry and excavator diesel amounts to GatherRates.json");
+                    Log("Loaded all defaults for GatherRates.json");
                 }
             }
             catch (Exception ex)
             {
                 Log($"Could not load vanilla gather defaults from in-game prefabs: {ex.Message}");
+            }
+
+            try
+            {
+                InstallLivestockProductionPatches();
+            }
+            catch (Exception ex)
+            {
+                Log($"Could not install livestock production overrides: {ex.Message}");
             }
             _gatherRatesNeedsVanillaFill = false;
             NotifyGatherStandDownIfNeeded();
@@ -7215,6 +7375,406 @@ namespace Oxide.Plugins
         }
         #endregion
 
+        private enum LivestockProduct { None, Milk, Wool, Dung }
+
+        private enum LivestockGeneTier { Bad, Ok, Good }
+
+        private struct LivestockYieldFrame
+        {
+            public string Key;
+            public LivestockProduct Kind;
+            public LivestockGeneTier Tier;
+        }
+
+        private static bool _livestockPatchesInstalled;
+
+        private bool TryGetLivestockProduction(string key, out LivestockProductionSettings settings)
+        {
+            settings = null;
+            if (string.IsNullOrEmpty(key) || Ore?.LivestockProduction == null) return false;
+            return Ore.LivestockProduction.TryGetValue(key, out settings) && settings != null;
+        }
+
+        private bool HasLivestockOverride()
+        {
+            if (Ore?.LivestockProduction == null) return false;
+            foreach (var settings in Ore.LivestockProduction.Values)
+                if (settings != null && settings.OverrideProduction) return true;
+            return false;
+        }
+
+        private static string LivestockPrefabKey(string prefabName)
+        {
+            if (string.IsNullOrEmpty(prefabName)) return null;
+            var name = prefabName.Replace('\\', '/');
+            var slash = name.LastIndexOf('/');
+            if (slash >= 0) name = name.Substring(slash + 1);
+            if (name.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".entity", StringComparison.OrdinalIgnoreCase) || name.EndsWith(".corpse", StringComparison.OrdinalIgnoreCase))
+                name = name.Substring(0, name.Length - 7);
+
+            if (name.Equals("cow", StringComparison.OrdinalIgnoreCase)) return LIVESTOCK_COW_PREFAB;
+            if (name.Equals("bull", StringComparison.OrdinalIgnoreCase)) return LIVESTOCK_BULL_PREFAB;
+            if (name.Equals("sheep", StringComparison.OrdinalIgnoreCase)) return LIVESTOCK_SHEEP_PREFAB;
+            return null;
+        }
+
+        private static bool IsFarmAnimalType(string name)
+        {
+            if (string.IsNullOrEmpty(name)) return false;
+            switch (name)
+            {
+                case "Cow":
+                case "Bull":
+                case "Sheep":
+                case "Calf":
+                case "Lamb":
+                case "Ram":
+                case "Livestock":
+                    return true;
+            }
+            return name.IndexOf("Livestock", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("FarmableAnimal", StringComparison.OrdinalIgnoreCase) >= 0;
+        }
+
+        private static bool IsProduceMethod(string name, out LivestockProduct product)
+        {
+            product = LivestockProduct.None;
+            if (string.IsNullOrEmpty(name) || name.IndexOf('<') >= 0) return false;
+            if (name.StartsWith("get_", StringComparison.Ordinal) || name.StartsWith("set_", StringComparison.Ordinal)) return false;
+            if (name.StartsWith("get", StringComparison.OrdinalIgnoreCase) || name.StartsWith("set", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("has", StringComparison.OrdinalIgnoreCase) || name.StartsWith("can", StringComparison.OrdinalIgnoreCase)
+                || name.StartsWith("is", StringComparison.OrdinalIgnoreCase))
+                return false;
+
+            if (name.IndexOf("dung", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("poop", StringComparison.OrdinalIgnoreCase) >= 0)
+                product = LivestockProduct.Dung;
+            else if (name.IndexOf("shear", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("fleece", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("wool", StringComparison.OrdinalIgnoreCase) >= 0)
+                product = LivestockProduct.Wool;
+            else if (name.IndexOf("milk", StringComparison.OrdinalIgnoreCase) >= 0)
+                product = LivestockProduct.Milk;
+            else
+                return false;
+
+            bool passive = name.IndexOf("update", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("tick", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("idle", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("think", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("cooldown", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("timer", StringComparison.OrdinalIgnoreCase) >= 0;
+            bool active = name.IndexOf("produce", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("give", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("spawn", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("create", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.IndexOf("drop", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("shear", StringComparison.OrdinalIgnoreCase) >= 0
+                || name.StartsWith("do", StringComparison.OrdinalIgnoreCase);
+            return !passive || active;
+        }
+
+        private void InstallLivestockProductionPatches()
+        {
+            if (_livestockPatchesInstalled || !HasLivestockOverride()) return;
+            _livestockPatchesInstalled = true;
+
+            Type[] types;
+            try { types = typeof(BaseEntity).Assembly.GetTypes(); }
+            catch (ReflectionTypeLoadException ex) { types = ex.Types; }
+
+            var hooked = new List<string>();
+            var enter = new HarmonyMethod(typeof(LivestockProductionPatches), nameof(LivestockProductionPatches.Enter));
+            var leave = new HarmonyMethod(typeof(LivestockProductionPatches), nameof(LivestockProductionPatches.Leave));
+            var clear = new HarmonyMethod(typeof(LivestockProductionPatches), nameof(LivestockProductionPatches.Clear));
+            if (types != null)
+            {
+                foreach (var type in types)
+                {
+                    if (type == null || type.IsAbstract || !typeof(BaseEntity).IsAssignableFrom(type) || !IsFarmAnimalType(type.Name))
+                        continue;
+
+                    foreach (var method in type.GetMethods(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                    {
+                        if (method.IsAbstract || method.IsGenericMethod || method.GetMethodBody() == null) continue;
+                        if (!IsProduceMethod(method.Name, out _)) continue;
+
+                        try
+                        {
+                            HarmonyInstance.Patch(method, prefix: enter, postfix: leave, finalizer: clear);
+                            hooked.Add(type.Name + "." + method.Name);
+                        }
+                        catch (Exception ex)
+                        {
+                            PrintError($"[HARMONY] Failed to patch {type.Name}.{method.Name}: {ex.Message}");
+                        }
+                    }
+                }
+            }
+
+            var skipped = hooked.Count > 0 ? PatchLivestockCreates() : new List<string>();
+            if (hooked.Count > 0)
+                Log("Livestock production hooked " + string.Join(", ", hooked));
+            else
+                Log("Livestock production overrides are on, but no milk, wool, or dung methods were found.");
+
+            if (skipped.Count > 0)
+                Log("Livestock production skipped ItemManager.Create overloads: " + string.Join("; ", skipped));
+        }
+
+        private List<string> PatchLivestockCreates()
+        {
+            var skipped = new List<string>();
+            var prefix = new HarmonyMethod(typeof(LivestockProductionPatches), nameof(LivestockProductionPatches.RewriteCreate));
+            foreach (var method in typeof(ItemManager).GetMethods(BindingFlags.Public | BindingFlags.Static))
+            {
+                if (method.Name != "Create") continue;
+                var parameters = method.GetParameters();
+                bool hasDef = false, hasAmount = false;
+                for (int i = 0; i < parameters.Length; i++)
+                {
+                    if (parameters[i].ParameterType == typeof(ItemDefinition)) hasDef = true;
+                    if (parameters[i].ParameterType == typeof(int)) hasAmount = true;
+                }
+                if (!hasDef || !hasAmount) continue;
+                if (parameters.Length < 2 || parameters[0].ParameterType != typeof(ItemDefinition) || parameters[1].ParameterType != typeof(int))
+                {
+                    skipped.Add(string.Join(", ", parameters.Select(parameter => parameter.ParameterType.Name + " " + parameter.Name)));
+                    continue;
+                }
+
+                try { HarmonyInstance.Patch(method, prefix: prefix); }
+                catch (Exception ex) { PrintError($"[HARMONY] Failed to patch ItemManager.Create: {ex.Message}"); }
+            }
+            return skipped;
+        }
+
+        private static class LivestockProductionPatches
+        {
+            [ThreadStatic] private static Stack<LivestockYieldFrame> _frames;
+            private static readonly Dictionary<Type, Dictionary<LivestockProduct, CooldownSlot[]>> _cooldowns = new Dictionary<Type, Dictionary<LivestockProduct, CooldownSlot[]>>();
+
+            private struct CooldownSlot
+            {
+                public FieldInfo Field;
+                public bool Stamp;
+            }
+
+            public static void Enter(object __instance, MethodBase __originalMethod)
+            {
+                var frame = new LivestockYieldFrame();
+                var inst = _instance;
+                if (inst != null && __instance is BaseEntity entity && __originalMethod != null && IsProduceMethod(__originalMethod.Name, out var product))
+                {
+                    frame.Key = LivestockPrefabKey(entity.PrefabName) ?? LivestockPrefabKey(entity.ShortPrefabName);
+                    frame.Kind = product;
+                    frame.Tier = ReadGeneTier(__instance, product);
+                }
+
+                if (_frames == null) _frames = new Stack<LivestockYieldFrame>(2);
+                _frames.Push(frame);
+            }
+
+            public static void Leave(object __instance)
+            {
+                var inst = _instance;
+                if (inst == null || _frames == null || _frames.Count == 0) return;
+                var frame = _frames.Peek();
+                if (frame.Kind == LivestockProduct.None || string.IsNullOrEmpty(frame.Key) || inst.ShouldStandDownGatherRates()) return;
+                if (!inst.TryGetLivestockProduction(frame.Key, out var settings) || settings == null || !settings.OverrideProduction) return;
+                if (__instance == null) return;
+
+                var gene = settings.ForTier(frame.Tier);
+                float seconds = frame.Kind == LivestockProduct.Milk ? gene.MilkCooldownSeconds
+                    : frame.Kind == LivestockProduct.Wool ? gene.WoolCooldownSeconds
+                    : gene.DungIntervalSeconds;
+                if (seconds < 0f) seconds = 0f;
+
+                foreach (var slot in CooldownSlots(__instance.GetType(), frame.Kind))
+                {
+                    if (slot.Field.FieldType == typeof(float))
+                        slot.Field.SetValue(__instance, slot.Stamp ? Time.time + seconds : seconds);
+                    else
+                        slot.Field.SetValue(__instance, slot.Stamp ? (double)Time.time + seconds : (double)seconds);
+                }
+            }
+
+            public static void Clear()
+            {
+                if (_frames != null && _frames.Count > 0) _frames.Pop();
+            }
+
+            public static void RewriteCreate([HarmonyArgument(0)] ItemDefinition definition, [HarmonyArgument(1)] ref int amount)
+            {
+                if (definition == null || _frames == null || _frames.Count == 0) return;
+                var inst = _instance;
+                if (inst == null || inst.ShouldStandDownGatherRates()) return;
+
+                var frame = _frames.Peek();
+                if (frame.Kind == LivestockProduct.None || string.IsNullOrEmpty(frame.Key)) return;
+                if (!inst.TryGetLivestockProduction(frame.Key, out var settings) || settings == null || !settings.OverrideProduction) return;
+
+                var gene = settings.ForTier(frame.Tier);
+                var shortname = definition.shortname;
+                if (string.IsNullOrEmpty(shortname)) return;
+
+                if (frame.Kind == LivestockProduct.Milk && shortname.Equals("milk", StringComparison.OrdinalIgnoreCase))
+                    amount = Math.Max(0, gene.MilkAmount);
+                else if (frame.Kind == LivestockProduct.Wool && shortname.Equals("wool", StringComparison.OrdinalIgnoreCase))
+                {
+                    int full = gene.WoolAmount;
+                    int vanillaFull = frame.Tier == LivestockGeneTier.Bad ? 6 : frame.Tier == LivestockGeneTier.Good ? 16 : 10;
+                    if (amount <= 0 || full <= 0) amount = 0;
+                    else if (amount >= vanillaFull * 0.6f) amount = full;
+                    else amount = Mathf.Max(0, Mathf.RoundToInt(amount * (full / (float)vanillaFull)));
+                }
+                else if (frame.Kind == LivestockProduct.Dung && (shortname.Equals("horsedung", StringComparison.OrdinalIgnoreCase) || shortname.Equals("dung", StringComparison.OrdinalIgnoreCase)))
+                    amount = Math.Max(0, gene.DungAmount);
+            }
+
+            private struct GeneSlot
+            {
+                public FieldInfo Parent;
+                public FieldInfo Field;
+                public bool Found;
+            }
+
+            private static readonly Dictionary<string, GeneSlot> _geneFields = new Dictionary<string, GeneSlot>(StringComparer.Ordinal);
+            private static readonly HashSet<string> _loggedMissingGenes = new HashSet<string>(StringComparer.Ordinal);
+
+            private static LivestockGeneTier ReadGeneTier(object instance, LivestockProduct kind)
+            {
+                if (instance == null || kind == LivestockProduct.None) return LivestockGeneTier.Ok;
+                var slot = GeneField(instance.GetType(), kind);
+                if (!slot.Found)
+                {
+                    string miss = instance.GetType().Name + ":" + kind;
+                    if (_loggedMissingGenes.Add(miss))
+                        _instance?.Log("No " + kind + " gene field on " + instance.GetType().Name + ". That animal uses the Ok production settings.");
+                    return LivestockGeneTier.Ok;
+                }
+
+                object target = slot.Parent == null ? instance : slot.Parent.GetValue(instance);
+                if (target == null) return LivestockGeneTier.Ok;
+                return TierFromValue(slot.Field.GetValue(target));
+            }
+
+            private static GeneSlot GeneField(Type type, LivestockProduct kind)
+            {
+                string key = type.FullName + ":" + kind;
+                if (_geneFields.TryGetValue(key, out var cached)) return cached;
+
+                GeneSlot best = default;
+                int bestScore = 0;
+                for (var current = type; current != null && current != typeof(object); current = current.BaseType)
+                {
+                    foreach (var field in current.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                    {
+                        int score = GeneScore(field, kind);
+                        if (score > bestScore)
+                        {
+                            bestScore = score;
+                            best = new GeneSlot { Field = field, Found = true };
+                        }
+
+                        if (field.FieldType.IsPrimitive || field.FieldType == typeof(string) || typeof(UnityEngine.Object).IsAssignableFrom(field.FieldType))
+                            continue;
+                        if (field.Name.IndexOf("gene", StringComparison.OrdinalIgnoreCase) < 0) continue;
+                        foreach (var inner in field.FieldType.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic))
+                        {
+                            int innerScore = GeneScore(inner, kind);
+                            if (innerScore <= 0 || innerScore + 5 <= bestScore) continue;
+                            bestScore = innerScore + 5;
+                            best = new GeneSlot { Parent = field, Field = inner, Found = true };
+                        }
+                    }
+                }
+
+                _geneFields[key] = best;
+                return best;
+            }
+
+            private static int GeneScore(FieldInfo field, LivestockProduct kind)
+            {
+                var name = field.Name;
+                if (string.IsNullOrEmpty(name)) return 0;
+                if (name.IndexOf("cool", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("regrow", StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("interval", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("delay", StringComparison.OrdinalIgnoreCase) >= 0
+                    || name.IndexOf("timer", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("next", StringComparison.OrdinalIgnoreCase) >= 0)
+                    return 0;
+
+                bool product = kind == LivestockProduct.Dung
+                    ? name.IndexOf("dung", StringComparison.OrdinalIgnoreCase) >= 0
+                    : name.IndexOf("yield", StringComparison.OrdinalIgnoreCase) >= 0;
+                if (!product) return 0;
+                if (field.FieldType.IsEnum) return 100;
+                if (field.FieldType == typeof(int) || field.FieldType == typeof(byte) || field.FieldType == typeof(sbyte)) return 40;
+                if (field.FieldType == typeof(float) && name.IndexOf("gene", StringComparison.OrdinalIgnoreCase) >= 0) return 30;
+                return 0;
+            }
+
+            private static LivestockGeneTier TierFromValue(object value)
+            {
+                if (value == null) return LivestockGeneTier.Ok;
+                var type = value.GetType();
+                if (type.IsEnum)
+                {
+                    var name = value.ToString();
+                    if (name.IndexOf("bad", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("poor", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return LivestockGeneTier.Bad;
+                    if (name.IndexOf("good", StringComparison.OrdinalIgnoreCase) >= 0 || name.IndexOf("great", StringComparison.OrdinalIgnoreCase) >= 0)
+                        return LivestockGeneTier.Good;
+                    return LivestockGeneTier.Ok;
+                }
+
+                if (value is float || value is double)
+                {
+                    float scale = Convert.ToSingle(value);
+                    if (scale < 0.75f) return LivestockGeneTier.Bad;
+                    if (scale > 1.3f) return LivestockGeneTier.Good;
+                    return LivestockGeneTier.Ok;
+                }
+
+                if (value is int || value is byte || value is sbyte || value is short)
+                {
+                    int grade = Convert.ToInt32(value);
+                    if (grade <= 0) return LivestockGeneTier.Bad;
+                    if (grade == 1) return LivestockGeneTier.Ok;
+                    return LivestockGeneTier.Good;
+                }
+
+                return LivestockGeneTier.Ok;
+            }
+
+            private static CooldownSlot[] CooldownSlots(Type type, LivestockProduct kind)
+            {
+                if (!_cooldowns.TryGetValue(type, out var byKind))
+                    _cooldowns[type] = byKind = new Dictionary<LivestockProduct, CooldownSlot[]>();
+                if (byKind.TryGetValue(kind, out var slots)) return slots;
+
+                var found = new List<CooldownSlot>();
+                for (var current = type; current != null && current != typeof(object); current = current.BaseType)
+                {
+                    foreach (var field in current.GetFields(BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic | BindingFlags.DeclaredOnly))
+                    {
+                        if (field.IsStatic || field.IsInitOnly || field.IsLiteral) continue;
+                        if (field.FieldType != typeof(float) && field.FieldType != typeof(double)) continue;
+                        var n = field.Name;
+                        if (n.IndexOf("gene", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("multiplier", StringComparison.OrdinalIgnoreCase) >= 0
+                            || n.IndexOf("max", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("chance", StringComparison.OrdinalIgnoreCase) >= 0)
+                            continue;
+                        bool timer = n.IndexOf("cool", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("regrow", StringComparison.OrdinalIgnoreCase) >= 0
+                            || n.IndexOf("recharge", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("interval", StringComparison.OrdinalIgnoreCase) >= 0
+                            || n.IndexOf("delay", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("next", StringComparison.OrdinalIgnoreCase) >= 0
+                            || n.IndexOf("timer", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (!timer) continue;
+                        bool product = kind == LivestockProduct.Milk ? n.IndexOf("milk", StringComparison.OrdinalIgnoreCase) >= 0
+                            : kind == LivestockProduct.Wool ? n.IndexOf("wool", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("fleece", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("shear", StringComparison.OrdinalIgnoreCase) >= 0
+                            : kind == LivestockProduct.Dung && n.IndexOf("dung", StringComparison.OrdinalIgnoreCase) >= 0;
+                        if (!product) continue;
+                        bool stamp = n.IndexOf("next", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("until", StringComparison.OrdinalIgnoreCase) >= 0
+                            || n.IndexOf("stamp", StringComparison.OrdinalIgnoreCase) >= 0 || n.IndexOf("ready", StringComparison.OrdinalIgnoreCase) >= 0;
+                        found.Add(new CooldownSlot { Field = field, Stamp = stamp });
+                    }
+                }
+
+                slots = found.ToArray();
+                byKind[kind] = slots;
+                return slots;
+            }
+        }
+
         #region Harmony Patches
         [HarmonyPatch(typeof(BaseMission), "GiveRewards")]
         private static class BaseMission_GiveRewards_Patch
@@ -7362,13 +7922,8 @@ namespace Oxide.Plugins
                 _instance.timer.Once(respawnDelay, () =>
                 {
                     if (_instance is null) return;
-                    RespawnOre(oreData, settings);
+                    _instance.TryRespawnResource(oreData, settings);
                 });
-            }
-
-            private static void RespawnOre(OreNodeData oreData, OreTypeSettings settings)
-            {
-                _instance.TryRespawnResource(oreData, settings);
             }
         }
 
@@ -8023,7 +8578,11 @@ namespace Oxide.Plugins
                 var target = Mathf.RoundToInt(GetConfiguredToolAmount(match, tool) * multiplier);
                 session.GivenByItem.TryGetValue(match.Shortname, out var already);
                 var remaining = Mathf.Max(0, target - already);
-                var give = isBonus ? remaining : Mathf.Clamp(Mathf.RoundToInt(target * fraction), 0, remaining);
+                session.VanillaTakenByItem.TryGetValue(vanillaName, out var taken);
+                taken += vanillaHit;
+                session.VanillaTakenByItem[vanillaName] = taken;
+                bool finished = isBonus || (startForItem > 0f && taken + 0.001f >= startForItem);
+                var give = finished ? remaining : Mathf.Clamp(Mathf.RoundToInt(target * fraction), 0, remaining);
                 item.amount = give;
                 session.GivenByItem[match.Shortname] = already + give;
             }
