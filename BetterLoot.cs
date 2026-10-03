@@ -460,15 +460,15 @@ namespace Oxide.Plugins
             public Dictionary<string, bool> WatchedPrefabs = new();
             [JsonProperty("Stand down gather rates if other gather plugins are loaded")]
             public bool StandDownGatherRatesIfOtherPlugins = true;
-            [JsonProperty("Other gather plugin names")]
+            [JsonProperty("Other gather plugin names", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<string> OtherGatherPluginNames = new List<string>
             {
                 "GatherManager",
+                "AdvancedGather",
+                "DayNightGather",
+                "ExtraGatherBonuses",
                 "InstantGather",
-                "GatherControl",
-                "BetterGather",
-                "GUIGather",
-                "GatherMultiplier"
+                "Loottable"
             };
 
             #region v4.1.7 Configuration Migration
@@ -1397,6 +1397,44 @@ namespace Oxide.Plugins
             return itemDefinition?.GetComponentInChildren<ItemModUnwrap>();
         }
 
+        private static bool DeduplicateOtherGatherPluginNames(PluginConfig config)
+        {
+            if (config == null || config.Generic == null)
+                return false;
+
+            var names = config.Generic.OtherGatherPluginNames;
+            if (names == null || names.Count == 0)
+                return false;
+
+            var unique = new List<string>(names.Count);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var name in names)
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                var trimmed = name.Trim();
+                if (seen.Add(trimmed))
+                    unique.Add(trimmed);
+            }
+
+            if (unique.Count == names.Count)
+            {
+                for (int i = 0; i < unique.Count; i++)
+                {
+                    if (!string.Equals(unique[i], names[i], StringComparison.Ordinal))
+                    {
+                        config.Generic.OtherGatherPluginNames = unique;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            config.Generic.OtherGatherPluginNames = unique;
+            return true;
+        }
+
         protected override void LoadDefaultConfig() => _config = new PluginConfig();
 
         protected override void LoadConfig()
@@ -1424,11 +1462,14 @@ namespace Oxide.Plugins
 
                 _config = raw.ToObject<PluginConfig>() ?? new PluginConfig();
 
-                if (MaybeUpdateConfig(_config))
-                {
+                bool outdated = MaybeUpdateConfig(_config);
+                bool namesChanged = DeduplicateOtherGatherPluginNames(_config);
+                if (outdated)
                     Log("Configuration appears to be outdated; updating and saving Better Loot");
+                if (namesChanged)
+                    Log("Removed duplicate entries from Other gather plugin names.");
+                if (outdated || namesChanged)
                     SaveConfig();
-                }
 
                 Log("Loaded configuration!");
             }
