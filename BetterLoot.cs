@@ -7418,7 +7418,7 @@ namespace Oxide.Plugins
 
         private enum LivestockProduct { None, Milk, Wool, Dung }
 
-        private enum LivestockGeneTier { Bad, Ok, Good }
+        public enum LivestockGeneTier { Bad, Ok, Good }
 
         private struct LivestockYieldFrame
         {
@@ -7682,7 +7682,7 @@ namespace Oxide.Plugins
                 {
                     string miss = instance.GetType().Name + ":" + kind;
                     if (_loggedMissingGenes.Add(miss))
-                        _instance?.Log("No " + kind + " gene field on " + instance.GetType().Name + ". That animal uses the Ok production settings.");
+                        Log("No " + kind + " gene field on " + instance.GetType().Name + ". That animal uses the Ok production settings.");
                     return LivestockGeneTier.Ok;
                 }
 
