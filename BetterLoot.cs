@@ -2,7 +2,6 @@ using System;
 using System.IO;
 using System.Text;
 using Oxide.Core;
-using System.Data;
 using System.Linq;
 using UnityEngine;
 using Rust.Ai.Gen2;
@@ -12,7 +11,6 @@ using Facepunch;
 using Facepunch.Extend;
 using Oxide.Core.Plugins;
 using System.Collections;
-using System.Globalization;
 using System.Reflection;
 using System.Runtime.CompilerServices;
 using Newtonsoft.Json.Linq;
@@ -29,7 +27,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.3")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.4")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -286,15 +284,15 @@ namespace Oxide.Plugins
         private readonly Queue<OreSpawnPosition> spawnQueue = new Queue<OreSpawnPosition>();
         private readonly Dictionary<ulong, List<ProtoBuf.MapNote>> playerMarkers = new Dictionary<ulong, List<ProtoBuf.MapNote>>();
         private readonly Dictionary<int, HashSet<ulong>> playerSpatialGrid = new Dictionary<int, HashSet<ulong>>();
-        private readonly HashSet<uint> orePrefabIds = new HashSet<uint>();
-        private readonly HashSet<uint> collectablePrefabIds = new HashSet<uint>();
         private readonly Dictionary<ulong, Coroutine> activeShowCoroutines = new Dictionary<ulong, Coroutine>();
         private readonly Dictionary<string, NpcHarvestSettings> _npcHarvestHitCache = new Dictionary<string, NpcHarvestSettings>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _npcHarvestMissCache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private readonly Dictionary<string, OreType> _oreTypeCache = new Dictionary<string, OreType>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _oreTypeMissCache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Coroutine spawnCoroutine;
-        private Coroutine cleanupCoroutine;
+        private bool oreSpawnBusy;
+        private readonly HashSet<OreType> _nativeSuppressedTypes = new HashSet<OreType>();
+        private readonly HashSet<string> _failedSpawnPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private bool _harmonyPatchesApplied;
         private bool _oreSystemStarted;
         private bool _hasShouldBLPopulateContainer;
@@ -329,7 +327,7 @@ namespace Oxide.Plugins
 
             public WI_Cache(bool isLiquidWeapon, int maxMods, int maxAmmo, ItemSlot modTypes)
             {
-                //IsLiquidWeapon = isLiquidWeapon;
+                IsLiquidWeapon = isLiquidWeapon;
                 MaxMods = maxMods;
                 MaxAmmo = maxAmmo;
                 ModTypes = modTypes;
@@ -367,7 +365,7 @@ namespace Oxide.Plugins
         private const string ROSE_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/rose/rose-collectable.prefab";
         private const string SUNFLOWER_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/sunflower/sunflower-collectable.prefab";
         private const string WHEAT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/wheat/wheat-collectable.prefab";
-        private const string HQM_ORE_PREFAB = "assets/bundled/prefabs/autospawn/resource/ores/hqm-ore.prefab";
+        private const string HQM_ORE_PREFAB = "assets/bundled/prefabs/autospawn/resource/ore_hqm/hqm-ore.prefab";
         private const string WOOD_PILE_PREFAB = "assets/bundled/prefabs/autospawn/resource/wood_log_pile/wood-pile.prefab";
         private const string CACTUS_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_arid_cactus/cactus-1.prefab";
         private const string TREE_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_tundra_forestside/douglas_fir_d_small.prefab";
@@ -510,7 +508,7 @@ namespace Oxide.Plugins
             [JsonProperty("Enable Loot Pool Locking System")]
             public bool EnableLootPoolLocking = true;
             [JsonProperty("New loot tables use Vanilla Rust Loot RNG")]
-            public bool DefaultToVanillaLootRng = true;
+            public bool DefaultToVanillaLootRng = false;
         }
 
         private class ChatConfiguration
@@ -906,18 +904,18 @@ namespace Oxide.Plugins
             [JsonProperty("Biome Probabilities")]
             public OreBiomeProbabilities BiomeProbabilities = new OreBiomeProbabilities();
             [JsonProperty("Enabled")]
-            public bool Enabled = true;
+            public bool Enabled;
             [JsonProperty("Bonus Loot")]
             public List<OreBonusLootEntry> BonusLoot = new List<OreBonusLootEntry>();
             [JsonProperty("Override Gather Amounts")]
             public bool OverrideGatherAmounts;
             [JsonProperty("Gather Multiplier")]
             public float GatherMultiplier = 1f;
-            [JsonProperty("Gather Outputs")]
+            [JsonProperty("Gather Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OreGatherOutput> GatherOutputs = new List<OreGatherOutput>();
             [JsonProperty("Override Pickup Amounts")]
             public bool OverridePickupAmounts;
-            [JsonProperty("Pickup Outputs")]
+            [JsonProperty("Pickup Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OrePickupOutput> PickupOutputs = new List<OrePickupOutput>();
             [JsonProperty("Pickup Min Amount")]
             public int PickupMinAmount;
@@ -929,7 +927,7 @@ namespace Oxide.Plugins
         {
             [JsonProperty("Override Gather Amounts")]
             public bool OverrideGatherAmounts;
-            [JsonProperty("Gather Outputs")]
+            [JsonProperty("Gather Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OreGatherOutput> GatherOutputs = new List<OreGatherOutput>();
         }
 
@@ -937,7 +935,7 @@ namespace Oxide.Plugins
         {
             [JsonProperty("Override Gather Amounts")]
             public bool OverrideGatherAmounts;
-            [JsonProperty("Outputs")]
+            [JsonProperty("Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<QuarryHarvestOutput> Outputs = new List<QuarryHarvestOutput>();
         }
 
@@ -1642,6 +1640,7 @@ namespace Oxide.Plugins
 
             // Static BetterLoot instance
             _instance = null;
+            _manifestPrefabPaths = null;
             _config = null;
 
             ShutdownOreSpawnSystem();
@@ -3695,7 +3694,7 @@ namespace Oxide.Plugins
                     {
                         var container = CreatePrefabLoot();
 
-                        container.Enabled = !lootPrefab.Contains(bradleyCrate, CompareOptions.Ordinal) && !lootPrefab.Contains(heliCrate, CompareOptions.Ordinal);
+                        container.Enabled = !lootPrefab.Contains(bradleyCrate, StringComparison.Ordinal) && !lootPrefab.Contains(heliCrate, StringComparison.Ordinal);
                         container.ItemSettings.MaxScrap = 0;
 
                         var slotItemCount = 0;
@@ -3798,8 +3797,8 @@ namespace Oxide.Plugins
 
                         var container = CreatePrefabLoot();
 
-                        container.Enabled = !lootPrefab.Contains(bradleyCrate, CompareOptions.Ordinal) &&
-                                            !lootPrefab.Contains(heliCrate, CompareOptions.Ordinal);
+                        container.Enabled = !lootPrefab.Contains(bradleyCrate, StringComparison.Ordinal) &&
+                                            !lootPrefab.Contains(heliCrate, StringComparison.Ordinal);
                         container.ItemSettings.MinScrap = loot.scrapAmount;
                         container.ItemSettings.MaxScrap = loot.scrapAmount;
 
@@ -5217,13 +5216,8 @@ namespace Oxide.Plugins
         // API
         private bool isSupplyDropActive()
         {
-            if (!lootTables.LootTables.TryGetValue("assets/prefabs/misc/supply drop/supply_drop.prefab", out PrefabLoot? con) || con is null)
-                return false;
-
-            if (con.Enabled)
-                return true;
-
-            return false;
+            return lootTables.LootTables.TryGetValue("assets/prefabs/misc/supply drop/supply_drop.prefab", out PrefabLoot? con)
+                && con is { Enabled: true };
         }
         #endregion
 
@@ -6115,16 +6109,79 @@ namespace Oxide.Plugins
             _ => MineGatherTools
         };
 
+        private static HashSet<string> _manifestPrefabPaths;
+
         private static T FindPrefabComponent<T>(string prefabPath) where T : Component
         {
-            if (string.IsNullOrEmpty(prefabPath))
-                return null;
-
-            var go = GameManager.server.FindPrefab(prefabPath);
+            var go = FindLoadedPrefab(prefabPath);
             if (go == null)
                 return null;
 
             return go.GetComponent<T>() ?? go.GetComponentInChildren<T>(true);
+        }
+
+        // GameManager.FindPrefab logs when the path is missing, is not an assets path,
+        // or lives in an asset scene the server has not loaded. Skip those quietly.
+        private static GameObject FindLoadedPrefab(string prefabPath)
+        {
+            if (string.IsNullOrEmpty(prefabPath)
+                || !prefabPath.StartsWith("assets/", StringComparison.OrdinalIgnoreCase)
+                || !prefabPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            if (prefabPath.IndexOf("gib", StringComparison.OrdinalIgnoreCase) >= 0
+                || prefabPath.EndsWith("/m2bradley.prefab", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            prefabPath = ResolveManifestPrefab(prefabPath);
+            if (prefabPath == null)
+                return null;
+
+            return GameManager.server.FindPrefab(prefabPath);
+        }
+
+        private static string ResolveManifestPrefab(string prefabPath)
+        {
+            var known = ManifestPrefabPaths();
+            if (known == null)
+                return prefabPath;
+            if (known.Contains(prefabPath))
+                return prefabPath;
+
+            int slash = prefabPath.LastIndexOf('/');
+            string file = slash >= 0 ? prefabPath.Substring(slash + 1) : prefabPath;
+            string match = null;
+            foreach (string name in known)
+            {
+                if (name.Length < file.Length || !name.EndsWith(file, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (name.Length != file.Length && name[name.Length - file.Length - 1] != '/')
+                    continue;
+                if (match != null)
+                    return null;
+                match = name;
+            }
+
+            return match;
+        }
+
+        private static HashSet<string> ManifestPrefabPaths()
+        {
+            if (_manifestPrefabPaths != null)
+                return _manifestPrefabPaths;
+
+            var props = GameManifest.Current?.prefabProperties;
+            if (props == null)
+                return null;
+
+            _manifestPrefabPaths = new HashSet<string>(props.Length, StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in props)
+            {
+                if (!string.IsNullOrEmpty(prop?.name))
+                    _manifestPrefabPaths.Add(prop.name);
+            }
+
+            return _manifestPrefabPaths;
         }
 
         private static float GetDispenserMaxHealth(ResourceDispenser dispenser)
@@ -6279,6 +6336,52 @@ namespace Oxide.Plugins
             return changed;
         }
 
+        private bool RemoveDuplicateGatherOutputs()
+        {
+            bool changed = false;
+            foreach (var pair in EnumerateResourceTypes())
+            {
+                if (pair.Settings?.GatherOutputs != null && DeduplicateOutputs(pair.Settings.GatherOutputs, output => output?.Shortname))
+                    changed = true;
+            }
+
+            if (Ore.NpcHarvest != null)
+            {
+                foreach (var harvest in Ore.NpcHarvest.Values)
+                {
+                    if (harvest?.GatherOutputs != null && DeduplicateOutputs(harvest.GatherOutputs, output => output?.Shortname))
+                        changed = true;
+                }
+            }
+
+            return changed;
+        }
+
+        private static bool DeduplicateOutputs<T>(List<T> outputs, Func<T, string> shortname)
+        {
+            if (outputs == null || outputs.Count < 2)
+                return false;
+
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            var kept = new List<T>(outputs.Count);
+            for (int i = outputs.Count - 1; i >= 0; i--)
+            {
+                var output = outputs[i];
+                var name = shortname(output);
+                if (string.IsNullOrWhiteSpace(name) || !seen.Add(name))
+                    continue;
+                kept.Add(output);
+            }
+
+            kept.Reverse();
+            if (kept.Count == outputs.Count)
+                return false;
+
+            outputs.Clear();
+            outputs.AddRange(kept);
+            return true;
+        }
+
         private void InitOreSpawnSystem()
         {
             Ore.NpcHarvest = Ore.NpcHarvest == null
@@ -6290,10 +6393,17 @@ namespace Oxide.Plugins
                 bool vanillaChanged = PopulateVanillaGatherDefaults(_gatherRatesNeedsVanillaFill);
                 bool quarryChanged = EnsureQuarryHarvestDefaults();
                 bool livestockChanged = EnsureLivestockProductionDefaults();
-                if (vanillaChanged || quarryChanged || livestockChanged)
+                bool duplicatesRemoved = RemoveDuplicateGatherOutputs();
+                bool prefabsRepaired = RepairMissingOrePrefabs();
+                if (vanillaChanged || quarryChanged || livestockChanged || duplicatesRemoved || prefabsRepaired)
                 {
                     DataSystem.SaveOreSpawn();
-                    Log("Loaded all defaults for GatherRates.json");
+                    if (duplicatesRemoved)
+                        Log("Removed duplicate gather outputs from GatherRates.json");
+                    if (prefabsRepaired)
+                        Log("Corrected the HQM node prefab to assets/bundled/prefabs/autospawn/resource/ore_hqm/hqm-ore.prefab.");
+                    if (vanillaChanged || quarryChanged || livestockChanged)
+                        Log("Loaded all defaults for GatherRates.json");
                 }
             }
             catch (Exception ex)
@@ -6325,7 +6435,6 @@ namespace Oxide.Plugins
             halfMapSize = mapSize * 0.5f;
             _cachedPlayerDistSqr = Ore.MinPlayerDistance * Ore.MinPlayerDistance;
             SpawnHandler_SpawnRepeating_Patch.ResetTracking();
-            PopulateOrePrefabIds();
 
             if (!IsOreSystemEnabled())
             {
@@ -6370,16 +6479,18 @@ namespace Oxide.Plugins
             cachedPlayerCount = BasePlayer.activePlayerList.Count;
             UpdatePopulationScalar();
             _oreSystemStarted = true;
+            _nativeSuppressedTypes.Clear();
+            _failedSpawnPrefabs.Clear();
+            SpawnHandler_SpawnRepeating_Patch.ResetTracking();
 
             if (_oreStoredData.Ores.Count > 0)
             {
                 StopSpawning();
+                oreSpawnBusy = true;
                 spawnCoroutine = ServerMgr.Instance.StartCoroutine(RestoreOresCoroutine());
             }
             else
             {
-                if (Ore.DisableNativeSpawning)
-                    CleanupNativeOres();
                 StartSpawning();
             }
         }
@@ -6402,6 +6513,8 @@ namespace Oxide.Plugins
                 UnsubscribeOreHooks();
                 if (_oreSystemStarted)
                     CleanupSpawnedOres();
+                _nativeSuppressedTypes.Clear();
+                SpawnHandler_SpawnRepeating_Patch.ResetTracking();
                 _oreSystemStarted = false;
                 UpdateOreHookSubscriptions();
                 Puts("Ore spawning disabled. Native resource spawning is no longer suppressed.");
@@ -6411,12 +6524,9 @@ namespace Oxide.Plugins
         private void ShutdownOreSpawnSystem()
         {
             StopSpawning();
+            _nativeSuppressedTypes.Clear();
+            SpawnHandler_SpawnRepeating_Patch.ResetTracking();
             StopAllShowCoroutines();
-            if (cleanupCoroutine != null)
-            {
-                ServerMgr.Instance.StopCoroutine(cleanupCoroutine);
-                cleanupCoroutine = null;
-            }
 
             if (Ore.WipeOnUnload)
                 CleanupSpawnedOres();
@@ -6427,68 +6537,6 @@ namespace Oxide.Plugins
             playerSpatialGrid.Clear();
             _corpseNpcPrefabs.Clear();
             _oreSystemStarted = false;
-        }
-
-        private void PopulateOrePrefabIds()
-        {
-            orePrefabIds.Clear();
-            orePrefabIds.Add(StringPool.Get(STONE_ORE_PREFAB));
-            orePrefabIds.Add(StringPool.Get(METAL_ORE_PREFAB));
-            orePrefabIds.Add(StringPool.Get(SULFUR_ORE_PREFAB));
-            orePrefabIds.Add(StringPool.Get("assets/bundled/prefabs/autospawn/resource/ores_sand/metal-ore.prefab"));
-            orePrefabIds.Add(StringPool.Get("assets/bundled/prefabs/autospawn/resource/ores_sand/stone-ore.prefab"));
-            orePrefabIds.Add(StringPool.Get("assets/bundled/prefabs/autospawn/resource/ores_sand/sulfur-ore.prefab"));
-            orePrefabIds.Add(StringPool.Get("assets/bundled/prefabs/autospawn/resource/ores_snow/metal-ore.prefab"));
-            orePrefabIds.Add(StringPool.Get("assets/bundled/prefabs/autospawn/resource/ores_snow/stone-ore.prefab"));
-            orePrefabIds.Add(StringPool.Get("assets/bundled/prefabs/autospawn/resource/ores_snow/sulfur-ore.prefab"));
-            orePrefabIds.Add(StringPool.Get(HQM_ORE_PREFAB));
-            orePrefabIds.Add(StringPool.Get(WOOD_PILE_PREFAB));
-
-            collectablePrefabIds.Clear();
-            collectablePrefabIds.Add(StringPool.Get(STONE_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(METAL_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(SULFUR_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(WOOD_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(HEMP_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(BERRY_BLACK_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(BERRY_BLUE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(BERRY_GREEN_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(BERRY_RED_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(BERRY_WHITE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(BERRY_YELLOW_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(MUSHROOM_CLUSTER_5_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(MUSHROOM_CLUSTER_6_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(CORN_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(POTATO_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(PUMPKIN_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(ORCHID_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(ROSE_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(SUNFLOWER_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(WHEAT_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(HQM_COLLECTABLE_PREFAB));
-            collectablePrefabIds.Add(StringPool.Get(COCONUT_COLLECTABLE_PREFAB));
-        }
-
-        private static bool IsOrePrefab(string prefabName)
-        {
-            if (string.IsNullOrEmpty(prefabName)) return false;
-            if (prefabName.Contains("halloween", StringComparison.OrdinalIgnoreCase)) return false;
-            if (prefabName.Contains("collectablecandy", StringComparison.OrdinalIgnoreCase) ||
-                prefabName.Contains("collectableegg", StringComparison.OrdinalIgnoreCase) ||
-                prefabName.Contains("diesel_collectable", StringComparison.OrdinalIgnoreCase))
-                return false;
-
-            var isOre = prefabName.Contains("stone-ore") ||
-                        prefabName.Contains("metal-ore") ||
-                        prefabName.Contains("sulfur-ore") ||
-                        prefabName.Contains("hqm-ore");
-            if (isOre && !prefabName.Contains("collectable"))
-                return true;
-
-            if (prefabName.Contains("wood-pile") || prefabName.Contains("wood_log_pile"))
-                return true;
-
-            return prefabName.Contains("collectable") || prefabName.Contains("mushroom-cluster");
         }
 
         private void UpdateOreHookSubscriptions()
@@ -6570,16 +6618,6 @@ namespace Oxide.Plugins
             }
 
             _harmonyPatchesApplied = true;
-        }
-
-        private bool HasAnyBonusLoot()
-        {
-            foreach (var pair in EnumerateResourceTypes())
-            {
-                if (pair.Settings?.BonusLoot is { Count: > 0 })
-                    return true;
-            }
-            return false;
         }
 
         private bool HasAnyNodeBonusLoot()
@@ -6698,8 +6736,19 @@ namespace Oxide.Plugins
             return false;
         }
 
-        private bool IsOreSystemEnabled() =>
-            Ore.PerResourceSpawning ? HasAnyResourceEnabled() : Ore.Enabled;
+        private void SyncCustomSpawningMode()
+        {
+            if (HasAnyResourceEnabled())
+                Ore.PerResourceSpawning = true;
+            else if (Ore.PerResourceSpawning)
+                Ore.Enabled = false;
+        }
+
+        private bool IsOreSystemEnabled()
+        {
+            SyncCustomSpawningMode();
+            return Ore.PerResourceSpawning ? HasAnyResourceEnabled() : Ore.Enabled;
+        }
 
         private bool IsResourceCustomEnabled(OreType type)
         {
@@ -6921,8 +6970,9 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    var entity = GameManager.server.CreateEntity(saved.Prefab, position);
-                    if (entity is null && oreType == OreType.HQM)
+                    var prefab = ResolveOrePrefab(oreType, saved.Prefab);
+                    var entity = GameManager.server.CreateEntity(prefab, position);
+                    if (entity is null && oreType == OreType.HQM && !string.Equals(prefab, METAL_ORE_PREFAB, StringComparison.OrdinalIgnoreCase))
                         entity = GameManager.server.CreateEntity(METAL_ORE_PREFAB, position);
                     if (entity is null)
                     {
@@ -6945,14 +6995,30 @@ namespace Oxide.Plugins
 
             _oreStoredData.Ores.Clear();
 
-            if (Ore.DisableNativeSpawning)
-                CleanupNativeOres();
+            var restoredTypes = new HashSet<OreType>();
+            foreach (var node in spawnedOres.Values)
+            {
+                if (IsResourceCustomEnabled(node.Type))
+                    restoredTypes.Add(node.Type);
+            }
+            foreach (var oreType in restoredTypes)
+            {
+                _nativeSuppressedTypes.Add(oreType);
+                if (Ore.DisableNativeSpawning)
+                    CleanupNativeOres(oreType);
+            }
+            SpawnHandler_SpawnRepeating_Patch.ResetTracking();
 
             if (Ore.Debug)
                 Puts($"Restored {restored} ores from data ({failed} failed). Tracked: {spawnedOres.Count}");
 
+            var fill = SpawnEnabledTypes();
+            while (fill.MoveNext())
+                yield return fill.Current;
+
             yield return CoroutineEx.waitForSeconds(2f);
             RemoveFloatingOres();
+            FinishOreSpawnJob();
         }
         #endregion
 
@@ -7034,6 +7100,7 @@ namespace Oxide.Plugins
         private void StartSpawning()
         {
             StopSpawning();
+            oreSpawnBusy = true;
             RebuildPlayerSpatialGrid();
             spawnCoroutine = ServerMgr.Instance.StartCoroutine(SpawnOresCoroutine());
         }
@@ -7050,8 +7117,15 @@ namespace Oxide.Plugins
 
         private void StopSpawning()
         {
+            oreSpawnBusy = false;
             if (spawnCoroutine == null) return;
             ServerMgr.Instance.StopCoroutine(spawnCoroutine);
+            spawnCoroutine = null;
+        }
+
+        private void FinishOreSpawnJob()
+        {
+            oreSpawnBusy = false;
             spawnCoroutine = null;
         }
 
@@ -7062,6 +7136,8 @@ namespace Oxide.Plugins
             if (Ore.GlobalSpawnMultiplier <= 0.01f) yield break;
             var densityMult = Mathf.Sqrt(Mathf.Max(0.05f, Ore.GlobalSpawnMultiplier));
             var scaledGridSize = settings.GridSize * currentGridScalar / densityMult;
+            if (scaledGridSize < 1f)
+                yield break;
             var maxOffset = scaledGridSize * 0.4f;
 
             var evaluated = 0;
@@ -7102,7 +7178,7 @@ namespace Oxide.Plugins
             var terrainHeight = TerrainMeta.HeightMap.GetHeight(position);
             adjustedPos.y = terrainHeight;
 
-            if (adjustedPos.y < 1f)
+            if (adjustedPos.y < 0f)
                 return false;
 
             var waterInfo = WaterLevel.GetWaterInfo(adjustedPos, waves: false, volumes: true);
@@ -7119,12 +7195,9 @@ namespace Oxide.Plugins
             }
 
             var topology = TerrainMeta.TopologyMap.GetTopology(position);
-            const int BLOCKED_TOPOLOGY = TerrainTopology.RIVER | TerrainTopology.LAKE | TerrainTopology.SWAMP |
-                                         TerrainTopology.OCEAN | TerrainTopology.MONUMENT | TerrainTopology.ROADSIDE |
-                                         TerrainTopology.ROAD | TerrainTopology.RAIL | TerrainTopology.RAILSIDE |
-                                         TerrainTopology.CLIFF | TerrainTopology.OFFSHORE | TerrainTopology.BUILDING |
-                                         TerrainTopology.DECOR | TerrainTopology.RIVERSIDE | TerrainTopology.LAKESIDE |
-                                         TerrainTopology.BEACH | TerrainTopology.OCEANSIDE;
+            const int BLOCKED_TOPOLOGY = TerrainTopology.RIVER | TerrainTopology.LAKE | TerrainTopology.OCEAN |
+                                         TerrainTopology.MONUMENT | TerrainTopology.ROAD | TerrainTopology.RAIL |
+                                         TerrainTopology.CLIFF | TerrainTopology.OFFSHORE;
 
             if ((topology & BLOCKED_TOPOLOGY) != 0) 
                 return false;
@@ -7134,6 +7207,8 @@ namespace Oxide.Plugins
 
             biome = (TerrainBiome.Enum)TerrainMeta.BiomeMap.GetBiomeMaxType(position);
             var probability = GetBiomeProbability(settings.BiomeProbabilities, biome);
+            if (!HasAnyBiomeChance(settings.BiomeProbabilities))
+                probability = 1f;
 
             if (UnityEngine.Random.Range(0f, 1f) > probability) 
                 return false;
@@ -7155,71 +7230,177 @@ namespace Oxide.Plugins
         }
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static float GetBiomeProbability(OreBiomeProbabilities probs, TerrainBiome.Enum biome) => biome switch
+        private static bool HasAnyBiomeChance(OreBiomeProbabilities probs)
         {
-            TerrainBiome.Enum.Arid => probs.AridBiome,
-            TerrainBiome.Enum.Temperate => probs.TemperateBiome,
-            TerrainBiome.Enum.Arctic => probs.ArcticBiome,
-            TerrainBiome.Enum.Tundra => probs.TundraBiome,
-            TerrainBiome.Enum.Jungle => probs.JungleBiome,
-            _ => 0f
-        };
+            if (probs == null)
+                return false;
+            return probs.AridBiome > 0.001f || probs.TemperateBiome > 0.001f || probs.ArcticBiome > 0.001f
+                || probs.TundraBiome > 0.001f || probs.JungleBiome > 0.001f;
+        }
+
+        private static float GetBiomeProbability(OreBiomeProbabilities probs, TerrainBiome.Enum biome)
+        {
+            if (probs == null)
+                return 1f;
+
+            switch (biome)
+            {
+                case TerrainBiome.Enum.Arid: return probs.AridBiome;
+                case TerrainBiome.Enum.Temperate: return probs.TemperateBiome;
+                case TerrainBiome.Enum.Arctic: return probs.ArcticBiome;
+                case TerrainBiome.Enum.Tundra: return probs.TundraBiome;
+                case TerrainBiome.Enum.Jungle: return probs.JungleBiome;
+            }
+
+            switch ((int)biome)
+            {
+                case 0: return probs.AridBiome;
+                case 1: return probs.TemperateBiome;
+                case 2: return probs.TundraBiome;
+                case 3: return probs.ArcticBiome;
+                case 4: return probs.JungleBiome;
+                default: return 0f;
+            }
+        }
 
         private IEnumerator SpawnOresCoroutine()
         {
             yield return null;
 
-            spawnQueue.Clear();
-            foreach (var pair in EnumerateResourceTypes())
-            {
-                if (pair.Settings is { Enabled: true })
-                    yield return GeneratePositionsForOre(pair.Settings, pair.Type);
-            }
-
-            if (Ore.Debug)
-                Puts($"Generated {spawnQueue.Count} potential spawn positions (Grid scalar: {currentGridScalar:F2})");
-
-            var batchCount = 0;
-            var wait = CoroutineEx.waitForSeconds(Ore.SpawnDelay);
-
-            while (spawnQueue.Count > 0)
-            {
-                SpawnOre(spawnQueue.Dequeue());
-                batchCount++;
-
-                if (batchCount < Ore.BatchSize) continue;
-                yield return wait;
-                batchCount = 0;
-            }
-
-            if (Ore.Debug)
-                Puts($"Spawning completed. Total ores: {spawnedOres.Count}");
+            var fill = SpawnEnabledTypes();
+            while (fill.MoveNext())
+                yield return fill.Current;
 
             yield return CoroutineEx.waitForSeconds(1f);
             RemoveFloatingOres();
+            FinishOreSpawnJob();
         }
 
-        private void SpawnOre(OreSpawnPosition spawnData)
+        private IEnumerator SpawnEnabledTypes()
         {
-            var prefab = spawnData.Prefab;
+            var placed = 0;
+            var failed = 0;
+            var skipped = new List<string>();
+
+            foreach (var pair in EnumerateResourceTypes())
+            {
+                if (pair.Settings is not { Enabled: true })
+                    continue;
+                if (_nativeSuppressedTypes.Contains(pair.Type))
+                    continue;
+
+                spawnQueue.Clear();
+                var generate = GeneratePositionsForOre(pair.Settings, pair.Type);
+                while (generate.MoveNext())
+                    yield return generate.Current;
+
+                var queued = spawnQueue.Count;
+                if (queued == 0)
+                {
+                    skipped.Add(pair.Type.ToString());
+                    continue;
+                }
+
+                var spawnedThisType = 0;
+                var batchCount = 0;
+                var batchSize = Mathf.Max(1, Ore.BatchSize);
+                var wait = CoroutineEx.waitForSeconds(Mathf.Max(0.01f, Ore.SpawnDelay));
+                while (spawnQueue.Count > 0)
+                {
+                    if (SpawnOre(spawnQueue.Dequeue()))
+                    {
+                        placed++;
+                        spawnedThisType++;
+                    }
+                    else
+                    {
+                        failed++;
+                    }
+
+                    if (++batchCount < batchSize)
+                        continue;
+                    yield return wait;
+                    batchCount = 0;
+                }
+
+                if (spawnedThisType > 0 && Ore.DisableNativeSpawning)
+                {
+                    _nativeSuppressedTypes.Add(pair.Type);
+                    SpawnHandler_SpawnRepeating_Patch.ResetTracking();
+                    CleanupNativeOres(pair.Type);
+                }
+                else if (spawnedThisType == 0)
+                {
+                    skipped.Add(pair.Type.ToString());
+                }
+            }
+
+            Puts($"Custom spawning placed {placed} resources{(failed > 0 ? $" ({failed} failed)" : "")}.");
+            if (skipped.Count > 0)
+                Puts($"Custom spawning left vanilla nodes in place for: {string.Join(", ", skipped)}.");
+        }
+
+        private static string ResolveOrePrefab(OreType type, string prefab)
+        {
+            if (type == OreType.HQM && string.IsNullOrEmpty(prefab))
+                return HQM_ORE_PREFAB;
+            if (!string.IsNullOrEmpty(prefab) && prefab.IndexOf("/ores/hqm-ore.prefab", StringComparison.OrdinalIgnoreCase) >= 0)
+                return HQM_ORE_PREFAB;
+            return prefab;
+        }
+
+        private bool RepairMissingOrePrefabs()
+        {
+            var changed = false;
+            foreach (var pair in EnumerateResourceTypes())
+            {
+                if (pair.Settings == null)
+                    continue;
+                var resolved = ResolveOrePrefab(pair.Type, pair.Settings.Prefab);
+                if (string.Equals(resolved, pair.Settings.Prefab, StringComparison.Ordinal))
+                    continue;
+                pair.Settings.Prefab = resolved;
+                changed = true;
+            }
+            return changed;
+        }
+
+        private bool SpawnOre(OreSpawnPosition spawnData)
+        {
+            var prefab = ResolveOrePrefab(spawnData.Type, spawnData.Prefab);
             if (spawnData.Type == OreType.CollectMushroom)
                 prefab = UnityEngine.Random.Range(0, 2) == 0 ? MUSHROOM_CLUSTER_5_PREFAB : MUSHROOM_CLUSTER_6_PREFAB;
 
-            var entity = GameManager.server.CreateEntity(prefab, spawnData.Position);
-            if (entity is null && spawnData.Type == OreType.HQM)
-                entity = GameManager.server.CreateEntity(METAL_ORE_PREFAB, spawnData.Position);
-            if (entity is null) return;
-
-            entity.Spawn();
+            var rotation = Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f);
+            var entity = GameManager.server.CreateEntity(prefab, spawnData.Position, rotation);
+            if (entity is null && spawnData.Type == OreType.HQM && !string.Equals(prefab, METAL_ORE_PREFAB, StringComparison.OrdinalIgnoreCase))
+                entity = GameManager.server.CreateEntity(METAL_ORE_PREFAB, spawnData.Position, rotation);
+            if (entity is null)
+            {
+                if (_failedSpawnPrefabs.Add(prefab ?? string.Empty))
+                    PrintWarning($"Custom spawning could not create '{prefab}' for {spawnData.Type}.");
+                return false;
+            }
 
             var gatherMultiplier = 1f;
             if (IsNodeType(spawnData.Type) && Ore.RichVein.Enabled && UnityEngine.Random.Range(0f, 1f) < Ore.RichVein.Chance)
                 gatherMultiplier = Ore.RichVein.Multiplier;
 
             TrackResourceEntity(entity, spawnData.Type, gatherMultiplier, prefab, spawnData.Biome);
+            entity.Spawn();
+            if (entity.IsDestroyed || !spawnedOres.ContainsKey(entity))
+            {
+                if (spawnedOres.TryGetValue(entity, out var lost))
+                {
+                    DecrementOreCount(lost.Type, lost.GatherMultiplier);
+                    spawnedOres.Remove(entity);
+                }
+                return false;
+            }
 
             if (Ore.Debug && gatherMultiplier > 1f)
                 Puts($"Spawned RICH {spawnData.Type} vein at {spawnData.Position:F1} (x{gatherMultiplier})");
+            return true;
         }
 
         private void TrackResourceEntity(BaseEntity entity, OreType type, float gatherMultiplier, string prefab = null, TerrainBiome.Enum? biome = null)
@@ -7416,6 +7597,7 @@ namespace Oxide.Plugins
         }
         #endregion
 
+        #region Livestock Production
         private enum LivestockProduct { None, Milk, Wool, Dung }
 
         public enum LivestockGeneTier { Bad, Ok, Good }
@@ -7655,7 +7837,7 @@ namespace Oxide.Plugins
                 else if (frame.Kind == LivestockProduct.Wool && shortname.Equals("wool", StringComparison.OrdinalIgnoreCase))
                 {
                     int full = gene.WoolAmount;
-                    int vanillaFull = frame.Tier == LivestockGeneTier.Bad ? 6 : frame.Tier == LivestockGeneTier.Good ? 16 : 10;
+                    int vanillaFull = LivestockProductionSettings.VanillaTier(frame.Tier).WoolAmount;
                     if (amount <= 0 || full <= 0) amount = 0;
                     else if (amount >= vanillaFull * 0.6f) amount = full;
                     else amount = Mathf.Max(0, Mathf.RoundToInt(amount * (full / (float)vanillaFull)));
@@ -7815,6 +7997,7 @@ namespace Oxide.Plugins
                 return slots;
             }
         }
+        #endregion
 
         #region Harmony Patches
         [HarmonyPatch(typeof(BaseMission), "GiveRewards")]
@@ -7856,7 +8039,7 @@ namespace Oxide.Plugins
             private static bool Prefix(SpawnPopulationBase population, SpawnDistribution distribution)
             {
                 if (_instance == null || !_instance.Ore.DisableNativeSpawning || population is null ||
-                    (!_instance.Ore.PerResourceSpawning && !_instance.Ore.Enabled))
+                    !_instance.IsOreSystemEnabled())
                     return true;
 
                 var popName = population.name;
@@ -7901,16 +8084,16 @@ namespace Oxide.Plugins
                         string.Equals(name, "ores_snow", StringComparison.OrdinalIgnoreCase) ||
                         name.Contains("ores_jungle", StringComparison.OrdinalIgnoreCase))
                     {
-                        return _instance.IsResourceCustomEnabled(OreType.Stone)
-                            && _instance.IsResourceCustomEnabled(OreType.Metal)
-                            && _instance.IsResourceCustomEnabled(OreType.Sulfur);
+                        return _instance._nativeSuppressedTypes.Contains(OreType.Stone)
+                            && _instance._nativeSuppressedTypes.Contains(OreType.Metal)
+                            && _instance._nativeSuppressedTypes.Contains(OreType.Sulfur);
                     }
 
                     if (string.Equals(name, "hemp", StringComparison.OrdinalIgnoreCase))
-                        return _instance.IsResourceCustomEnabled(OreType.CollectHemp);
+                        return _instance._nativeSuppressedTypes.Contains(OreType.CollectHemp);
 
                     if (name.Contains("mushroom", StringComparison.OrdinalIgnoreCase))
-                        return _instance.IsResourceCustomEnabled(OreType.CollectMushroom);
+                        return _instance._nativeSuppressedTypes.Contains(OreType.CollectMushroom);
                 }
                 else if (string.Equals(name, "ores", StringComparison.OrdinalIgnoreCase) || 
                     string.Equals(name, "ores_sand", StringComparison.OrdinalIgnoreCase) || 
@@ -7932,7 +8115,7 @@ namespace Oxide.Plugins
                 {
                     if (prefab == null || string.IsNullOrEmpty(prefab.Name)) continue;
                     var inferred = _instance.InferOreTypeFromPrefab(prefab.Name);
-                    if (inferred.HasValue && _instance.IsResourceCustomEnabled(inferred.Value))
+                    if (inferred.HasValue && _instance._nativeSuppressedTypes.Contains(inferred.Value))
                         containsManaged = true;
                     else
                     {
@@ -8050,9 +8233,7 @@ namespace Oxide.Plugins
                 return false;
             var inferred = InferOreTypeFromPrefab(entity.PrefabName);
             if (!inferred.HasValue) return false;
-            if (Ore.PerResourceSpawning)
-                return IsResourceCustomEnabled(inferred.Value);
-            return true;
+            return _nativeSuppressedTypes.Contains(inferred.Value);
         }
 
         private void OnEntitySpawned(BaseNetworkable entity)
@@ -8073,56 +8254,33 @@ namespace Oxide.Plugins
             });
         }
 
-        private void CleanupNativeOres()
+        private void CleanupNativeOres(OreType? onlyType = null)
         {
+            if (!Ore.DisableNativeSpawning)
+                return;
+
             var toKill = Pool.Get<List<BaseEntity>>();
 
             foreach (var entity in BaseNetworkable.serverEntities)
             {
                 if (entity is not BaseEntity { IsDestroyed: false } worldEntity) continue;
                 if (!IsNativeManagedEntity(worldEntity) || spawnedOres.ContainsKey(worldEntity)) continue;
-                toKill.Add(worldEntity);
-            }
-
-            var count = toKill.Count;
-            foreach (var worldEntity in toKill)
-            {
-                if (worldEntity is not null && !worldEntity.IsDestroyed)
-                    worldEntity.Kill();
-            }
-
-            Pool.FreeUnmanaged(ref toKill);
-
-            if (count > 0)
-                Puts($"Cleaned up {count} existing native ore and collectable entities.");
-        }
-
-        private IEnumerator CleanupNativeOresCoroutine()
-        {
-            var toKill = Pool.Get<List<BaseEntity>>();
-
-            foreach (var entity in BaseNetworkable.serverEntities)
-            {
-                if (entity is not BaseEntity { IsDestroyed: false } worldEntity) continue;
-                if (!IsNativeManagedEntity(worldEntity) || spawnedOres.ContainsKey(worldEntity)) continue;
-                toKill.Add(worldEntity);
-            }
-
-            var count = toKill.Count;
-            var batch = 0;
-            foreach (var worldEntity in toKill)
-            {
-                if (worldEntity is not null && !worldEntity.IsDestroyed)
-                    worldEntity.Kill();
-                if (++batch >= Ore.BatchSize)
+                if (onlyType.HasValue)
                 {
-                    batch = 0;
-                    yield return null;
+                    var inferred = InferOreTypeFromPrefab(worldEntity.PrefabName);
+                    if (inferred != onlyType.Value) continue;
                 }
+                toKill.Add(worldEntity);
+            }
+
+            var count = toKill.Count;
+            foreach (var worldEntity in toKill)
+            {
+                if (worldEntity is not null && !worldEntity.IsDestroyed)
+                    worldEntity.Kill();
             }
 
             Pool.FreeUnmanaged(ref toKill);
-            cleanupCoroutine = null;
 
             if (count > 0)
                 Puts($"Cleaned up {count} existing native ore and collectable entities.");
@@ -8190,16 +8348,99 @@ namespace Oxide.Plugins
             _cachedGatherConflictNames = null;
         }
 
+        private Type _carbonGatherManagerType;
+        private bool _carbonGatherManagerTypeResolved;
+        private Func<bool> _carbonGatherManagerEnabled;
+
+        private bool IsCarbonGatherManagerEnabled()
+        {
+            if (!_carbonGatherManagerTypeResolved)
+            {
+                _carbonGatherManagerTypeResolved = true;
+                _carbonGatherManagerType = FindLoadedType("Carbon.Modules.GatherManagerModule");
+            }
+
+            if (_carbonGatherManagerType == null)
+                return false;
+
+            if (_carbonGatherManagerEnabled == null)
+            {
+                var singleton = _carbonGatherManagerType.GetProperty("Singleton", BindingFlags.Public | BindingFlags.Static)?.GetValue(null);
+                if (singleton == null)
+                    return false;
+
+                _carbonGatherManagerEnabled = BindCarbonModuleEnabled(singleton);
+            }
+
+            try
+            {
+                return _carbonGatherManagerEnabled();
+            }
+            catch
+            {
+                return false;
+            }
+        }
+
+        private static Func<bool> BindCarbonModuleEnabled(object module)
+        {
+            const BindingFlags flags = BindingFlags.Instance | BindingFlags.Public | BindingFlags.NonPublic;
+            for (var current = module.GetType(); current != null && current != typeof(object); current = current.BaseType)
+            {
+                foreach (var method in current.GetMethods(flags))
+                {
+                    if (method.ReturnType != typeof(bool) || method.GetParameters().Length != 0)
+                        continue;
+                    if (method.Name != "GetEnabled" && method.Name != "IsEnabled")
+                        continue;
+
+                    var target = module;
+                    return () => (bool)method.Invoke(target, null);
+                }
+
+                var enabled = current.GetProperty("Enabled", flags);
+                if (enabled?.PropertyType == typeof(bool) && enabled.GetMethod != null && enabled.GetIndexParameters().Length == 0)
+                {
+                    var getter = enabled.GetMethod;
+                    var target = module;
+                    return () => (bool)getter.Invoke(target, null);
+                }
+            }
+
+            return () => false;
+        }
+
+        private static Type FindLoadedType(string fullName)
+        {
+            foreach (var assembly in AppDomain.CurrentDomain.GetAssemblies())
+            {
+                var type = assembly.GetType(fullName, false);
+                if (type != null)
+                    return type;
+            }
+
+            return null;
+        }
+
         private bool ShouldStandDownGatherRates()
-            => _config?.Generic?.StandDownGatherRatesIfOtherPlugins == true && TryGetLoadedGatherConflictPlugins(out _);
+            => _config?.Generic?.StandDownGatherRatesIfOtherPlugins == true
+               && (IsCarbonGatherManagerEnabled() || TryGetLoadedGatherConflictPlugins(out _));
 
         private void NotifyGatherStandDownIfNeeded()
         {
-            if (_loggedGatherStandDown || !TryGetLoadedGatherConflictPlugins(out var names))
+            if (_loggedGatherStandDown || _config?.Generic?.StandDownGatherRatesIfOtherPlugins != true)
+                return;
+
+            TryGetLoadedGatherConflictPlugins(out var pluginNames);
+            var carbonGather = IsCarbonGatherManagerEnabled();
+            if ((pluginNames == null || pluginNames.Count == 0) && !carbonGather)
                 return;
 
             _loggedGatherStandDown = true;
-            Log($"Gather/harvest rate overrides are standing down because another gather plugin is loaded ({string.Join(", ", names)}). Set \"Stand down gather rates if other gather plugins are loaded\" to false in BetterLoot.json to apply BetterLoot amounts anyway.");
+            var listed = pluginNames == null ? new List<string>() : new List<string>(pluginNames);
+            if (carbonGather)
+                listed.Add("Carbon GatherManager");
+            Log($"Gather/harvest rate overrides are standing down because another gather plugin is loaded ({string.Join(", ", listed)}). Set \"Stand down gather rates if other gather plugins are loaded\" to false in BetterLoot.json to apply BetterLoot amounts anyway.");
         }
 
         private bool ShouldSkipGatherRateOverride(ResourceDispenser dispenser, BasePlayer player, Item item)
@@ -8362,15 +8603,15 @@ namespace Oxide.Plugins
             _loggedGatherStandDown = false;
         }
 
-        private object FinishOwnedDispenserHit(BasePlayer player, Item item, bool isBonus)
+        private static object FinishOwnedDispenserHit(Item item)
         {
-            if (isBonus)
+            if (item != null && item.amount <= 0)
+            {
+                item.Remove();
                 return true;
+            }
 
-            if (player != null && item != null && item.amount > 0)
-                player.GiveItem(item, BaseEntity.GiveItemReason.ResourceHarvested);
-
-            return true;
+            return null;
         }
 
         private object OnDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item)
@@ -8426,7 +8667,7 @@ namespace Oxide.Plugins
                 if (!isBonus)
                     ProcessBonusLoot(player, oreData.Type);
 
-                return owned ? FinishOwnedDispenserHit(player, item, isBonus) : null;
+                return owned ? FinishOwnedDispenserHit(item) : null;
             }
 
             if (!skipRates
@@ -8436,7 +8677,7 @@ namespace Oxide.Plugins
             {
                 var dummy = new OreNodeData(OreType.Stone, entity.transform.position, default(TerrainBiome.Enum), 1f, entity.PrefabName);
                 ApplyGatherOverride(dispenser, player, item, dummy, npcHarvest.GatherOutputs, isBonus);
-                return FinishOwnedDispenserHit(player, item, isBonus);
+                return FinishOwnedDispenserHit(item);
             }
 
             if (!skipRates)
@@ -8452,14 +8693,14 @@ namespace Oxide.Plugins
                     {
                         var nativeData = new OreNodeData(inferred.Value, entity.transform.position, default(TerrainBiome.Enum), 1f, entity.PrefabName);
                         if (ApplyGatherOverride(dispenser, player, item, nativeData, settings, isBonus))
-                            return FinishOwnedDispenserHit(player, item, isBonus);
+                            return FinishOwnedDispenserHit(item);
                     }
 
                     var scale = GetConfiguredGatherMultiplier(settings);
                     if (Mathf.Abs(scale - 1f) > 0.0001f)
                     {
                         item.amount = Mathf.Max(0, Mathf.FloorToInt(item.amount * scale));
-                        return FinishOwnedDispenserHit(player, item, isBonus);
+                        return FinishOwnedDispenserHit(item);
                     }
                 }
             }
@@ -8977,7 +9218,7 @@ namespace Oxide.Plugins
 
             if (totalCount == 0)
             {
-                if (spawnCoroutine != null)
+                if (oreSpawnBusy)
                     PrintToChat(player, $"Plugin {label} are still spawning. Try again in a moment.");
                 else if (!IsOreSystemEnabled())
                     PrintToChat(player, "Custom spawning is off. Enable it on a node or collectable in the Looty Editor via the Ores tab, then deploy with the Looty command.");
