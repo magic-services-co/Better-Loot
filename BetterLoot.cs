@@ -370,7 +370,7 @@ namespace Oxide.Plugins
         private const string CACTUS_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_arid_cactus/cactus-1.prefab";
         private const string TREE_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_tundra_forestside/douglas_fir_d_small.prefab";
         private const string HQM_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/stone/hqm-collectable.prefab";
-        private const string COCONUT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/coconut/coconut-collectable.prefab";
+        private const string COCONUT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/coconuts/coconut-spawn.prefab";
         private const string DIESEL_COLLECTABLE_PREFAB = "assets/content/structures/excavator/prefabs/diesel_collectable.prefab";
         private const string NATURAL_BEEHIVE_PREFAB = "assets/prefabs/resource/natural beehive/beehive.natural.prefab";
         private const string HALLOWEEN_BONE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/stone/halloween/halloween-bone-collectable.prefab";
@@ -6401,7 +6401,7 @@ namespace Oxide.Plugins
                     if (duplicatesRemoved)
                         Log("Removed duplicate gather outputs from GatherRates.json");
                     if (prefabsRepaired)
-                        Log("Corrected the HQM node prefab to assets/bundled/prefabs/autospawn/resource/ore_hqm/hqm-ore.prefab.");
+                        Log("Corrected missing resource prefab paths in GatherRates.json.");
                     if (vanillaChanged || quarryChanged || livestockChanged)
                         Log("Loaded all defaults for GatherRates.json");
                 }
@@ -7346,6 +7346,10 @@ namespace Oxide.Plugins
                 return HQM_ORE_PREFAB;
             if (!string.IsNullOrEmpty(prefab) && prefab.IndexOf("/ores/hqm-ore.prefab", StringComparison.OrdinalIgnoreCase) >= 0)
                 return HQM_ORE_PREFAB;
+            if (type == OreType.CollectCoconut && string.IsNullOrEmpty(prefab))
+                return COCONUT_COLLECTABLE_PREFAB;
+            if (!string.IsNullOrEmpty(prefab) && prefab.IndexOf("/coconut/coconut-collectable.prefab", StringComparison.OrdinalIgnoreCase) >= 0)
+                return COCONUT_COLLECTABLE_PREFAB;
             return prefab;
         }
 
