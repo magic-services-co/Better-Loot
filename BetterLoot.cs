@@ -5630,6 +5630,9 @@ namespace Oxide.Plugins
         {
             [ProtoBuf.ProtoMember(1)]
             public List<SavedOre> Ores { get; set; } = new List<SavedOre>();
+
+            [ProtoBuf.ProtoMember(2)]
+            public string SpawnSignature { get; set; }
         }
 
         [ProtoBuf.ProtoContract]
@@ -6483,7 +6486,7 @@ namespace Oxide.Plugins
             _failedSpawnPrefabs.Clear();
             SpawnHandler_SpawnRepeating_Patch.ResetTracking();
 
-            if (_oreStoredData.Ores.Count > 0)
+            if (SavedSpawnLayoutMatches())
             {
                 StopSpawning();
                 oreSpawnBusy = true;
@@ -6491,6 +6494,11 @@ namespace Oxide.Plugins
             }
             else
             {
+                if (_oreStoredData.Ores.Count > 0)
+                {
+                    Puts("Spawn settings changed. Rebuilding custom resource nodes.");
+                    DiscardSavedSpawnLayout();
+                }
                 StartSpawning();
             }
         }
@@ -6931,10 +6939,91 @@ namespace Oxide.Plugins
                 });
             }
 
+            _oreStoredData.SpawnSignature = BuildSpawnLayoutSignature();
             ProtoStorage.Save(_oreStoredData, ORE_DATA_FILE);
 
             if (Ore.Debug)
                 Puts($"Saved {_oreStoredData.Ores.Count} ore positions to data file");
+        }
+
+        private bool SavedSpawnLayoutMatches()
+        {
+            if (_oreStoredData?.Ores == null || _oreStoredData.Ores.Count == 0)
+                return false;
+            if (string.IsNullOrEmpty(_oreStoredData.SpawnSignature))
+                return false;
+            return string.Equals(_oreStoredData.SpawnSignature, BuildSpawnLayoutSignature(), StringComparison.Ordinal);
+        }
+
+        private void DiscardSavedSpawnLayout()
+        {
+            if (_oreStoredData?.Ores != null)
+            {
+                foreach (var ore in _oreStoredData.Ores)
+                {
+                    if (!Enum.IsDefined(typeof(OreType), ore.Type))
+                        continue;
+
+                    var position = new Vector3(ore.X, ore.Y, ore.Z);
+                    var existing = FindResourceEntityNear(position, ore.Prefab, (OreType)ore.Type);
+                    if (existing is not null && !existing.IsDestroyed)
+                        existing.Kill();
+                }
+
+                _oreStoredData.Ores.Clear();
+            }
+
+            if (_oreStoredData != null)
+                _oreStoredData.SpawnSignature = null;
+        }
+
+        private string BuildSpawnLayoutSignature()
+        {
+            var sb = new StringBuilder();
+            sb.Append(ScaleSignature(Ore.GlobalSpawnMultiplier)).Append('|');
+            sb.Append(ScaleSignature(Ore.NodeDensity)).Append('|');
+            sb.Append(ScaleSignature(Ore.MinPlayerDistance)).Append('|');
+            sb.Append(ScaleSignature(Ore.MinBuildingDistance)).Append('|');
+            sb.Append(ScaleSignature(Ore.WaterBuffer)).Append('|');
+            sb.Append(ScaleSignature(Ore.MaxSlope)).Append('|');
+
+            var population = Ore.PopulationScaling;
+            if (population != null)
+            {
+                sb.Append(population.Enabled ? '1' : '0').Append('|');
+                sb.Append(population.MinPlayers).Append('|');
+                sb.Append(population.MaxPlayers).Append('|');
+                sb.Append(ScaleSignature(population.MinPlayerScalar)).Append('|');
+                sb.Append(ScaleSignature(population.MaxPlayerScalar)).Append('|');
+            }
+
+            foreach (var pair in EnumerateResourceTypes())
+            {
+                if (pair.Settings is not { Enabled: true })
+                    continue;
+
+                var settings = pair.Settings;
+                var biomes = settings.BiomeProbabilities;
+                sb.Append((int)pair.Type).Append(':');
+                sb.Append(ScaleSignature(settings.GridSize)).Append(':');
+                sb.Append(settings.Prefab).Append(':');
+                if (biomes != null)
+                {
+                    sb.Append(ScaleSignature(biomes.AridBiome)).Append(',');
+                    sb.Append(ScaleSignature(biomes.TemperateBiome)).Append(',');
+                    sb.Append(ScaleSignature(biomes.ArcticBiome)).Append(',');
+                    sb.Append(ScaleSignature(biomes.TundraBiome)).Append(',');
+                    sb.Append(ScaleSignature(biomes.JungleBiome));
+                }
+                sb.Append(';');
+            }
+
+            return sb.ToString();
+        }
+
+        private static int ScaleSignature(float value)
+        {
+            return (int)Math.Round(value * 1000f);
         }
 
         private IEnumerator RestoreOresCoroutine()
@@ -7127,6 +7216,7 @@ namespace Oxide.Plugins
         {
             oreSpawnBusy = false;
             spawnCoroutine = null;
+            SaveOreData();
         }
 
         private const int GENERATE_YIELD_EVERY = 200;
