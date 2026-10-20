@@ -29,7 +29,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.2")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.4")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -72,6 +72,7 @@ namespace Oxide.Plugins
         private static bool _gatherRatesNeedsVanillaFill;
         private bool _loggedGatherStandDown;
         private OreSpawnConfiguration? _legacyConfigOreSpawn;
+        private JToken? _legacyConfigOreSpawnToken;
         private OreSpawnConfiguration Ore
         {
             get
@@ -112,10 +113,32 @@ namespace Oxide.Plugins
             },
             new[]
             {
+                "assets/rust.ai/agents/bull/bull.prefab",
+                "assets/rust.ai/agents/bull/bull.entity.prefab",
+                "assets/rust.ai/agents/bull/bull.corpse.prefab",
+                "assets/rust.ai/agents/livestock/bull.prefab",
+                "assets/rust.ai/agents/livestock/bull.entity.prefab",
+                "assets/rust.ai/agents/livestock/bull.corpse.prefab",
+                "assets/rust.ai/agents/cattle/bull.prefab",
+                "assets/rust.ai/agents/cattle/bull.corpse.prefab"
+            },
+            new[]
+            {
                 "assets/rust.ai/agents/chicken/chicken.prefab",
                 "assets/rust.ai/agents/chicken/chicken.corpse.prefab",
                 "assets/rust.ai/agents/chicken/chicken.corpse.tutorial.prefab",
                 "assets/rust.ai/agents/chicken/chicken.tutorial.prefab"
+            },
+            new[]
+            {
+                "assets/rust.ai/agents/cow/cow.prefab",
+                "assets/rust.ai/agents/cow/cow.entity.prefab",
+                "assets/rust.ai/agents/cow/cow.corpse.prefab",
+                "assets/rust.ai/agents/livestock/cow.prefab",
+                "assets/rust.ai/agents/livestock/cow.entity.prefab",
+                "assets/rust.ai/agents/livestock/cow.corpse.prefab",
+                "assets/rust.ai/agents/cattle/cow.prefab",
+                "assets/rust.ai/agents/cattle/cow.corpse.prefab"
             },
             new[]
             {
@@ -136,6 +159,17 @@ namespace Oxide.Plugins
             {
                 "assets/rust.ai/agents/fish/simpleshark.prefab",
                 "assets/rust.ai/agents/fish/shark.corpse.prefab"
+            },
+            new[]
+            {
+                "assets/rust.ai/agents/sheep/sheep.prefab",
+                "assets/rust.ai/agents/sheep/sheep.entity.prefab",
+                "assets/rust.ai/agents/sheep/sheep.corpse.prefab",
+                "assets/rust.ai/agents/livestock/sheep.prefab",
+                "assets/rust.ai/agents/livestock/sheep.entity.prefab",
+                "assets/rust.ai/agents/livestock/sheep.corpse.prefab",
+                "assets/rust.ai/agents/cattle/sheep.prefab",
+                "assets/rust.ai/agents/cattle/sheep.corpse.prefab"
             },
             new[]
             {
@@ -261,6 +295,8 @@ namespace Oxide.Plugins
         private readonly Dictionary<string, OreType> _oreTypeCache = new Dictionary<string, OreType>(StringComparer.OrdinalIgnoreCase);
         private readonly HashSet<string> _oreTypeMissCache = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Coroutine spawnCoroutine;
+        private readonly HashSet<OreType> _nativeSuppressedTypes = new HashSet<OreType>();
+        private readonly HashSet<string> _failedSpawnPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
         private Coroutine cleanupCoroutine;
         private bool _harmonyPatchesApplied;
         private bool _oreSystemStarted;
@@ -296,7 +332,7 @@ namespace Oxide.Plugins
 
             public WI_Cache(bool isLiquidWeapon, int maxMods, int maxAmmo, ItemSlot modTypes)
             {
-                //IsLiquidWeapon = isLiquidWeapon;
+                IsLiquidWeapon = isLiquidWeapon;
                 MaxMods = maxMods;
                 MaxAmmo = maxAmmo;
                 ModTypes = modTypes;
@@ -334,12 +370,12 @@ namespace Oxide.Plugins
         private const string ROSE_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/rose/rose-collectable.prefab";
         private const string SUNFLOWER_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/sunflower/sunflower-collectable.prefab";
         private const string WHEAT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/wheat/wheat-collectable.prefab";
-        private const string HQM_ORE_PREFAB = "assets/bundled/prefabs/autospawn/resource/ores/hqm-ore.prefab";
+        private const string HQM_ORE_PREFAB = "assets/bundled/prefabs/autospawn/resource/ore_hqm/hqm-ore.prefab";
         private const string WOOD_PILE_PREFAB = "assets/bundled/prefabs/autospawn/resource/wood_log_pile/wood-pile.prefab";
         private const string CACTUS_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_arid_cactus/cactus-1.prefab";
         private const string TREE_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_tundra_forestside/douglas_fir_d_small.prefab";
         private const string HQM_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/stone/hqm-collectable.prefab";
-        private const string COCONUT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/coconut/coconut-collectable.prefab";
+        private const string COCONUT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/coconuts/coconut-spawn.prefab";
         private const string DIESEL_COLLECTABLE_PREFAB = "assets/content/structures/excavator/prefabs/diesel_collectable.prefab";
         private const string NATURAL_BEEHIVE_PREFAB = "assets/prefabs/resource/natural beehive/beehive.natural.prefab";
         private const string HALLOWEEN_BONE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/stone/halloween/halloween-bone-collectable.prefab";
@@ -357,6 +393,9 @@ namespace Oxide.Plugins
         private const string QUARRY_STONE_KEY = "Stone Quarry";
         private const string QUARRY_SULFUR_KEY = "Sulfur Quarry";
         private const string QUARRY_EXCAVATOR_KEY = "Giant Excavator";
+        private const string LIVESTOCK_COW_PREFAB = "assets/rust.ai/agents/cow/cow.prefab";
+        private const string LIVESTOCK_BULL_PREFAB = "assets/rust.ai/agents/bull/bull.prefab";
+        private const string LIVESTOCK_SHEEP_PREFAB = "assets/rust.ai/agents/sheep/sheep.prefab";
         #endregion
 
         #region Lang
@@ -424,15 +463,17 @@ namespace Oxide.Plugins
             public Dictionary<string, bool> WatchedPrefabs = new();
             [JsonProperty("Stand down gather rates if other gather plugins are loaded")]
             public bool StandDownGatherRatesIfOtherPlugins = true;
-            [JsonProperty("Other gather plugin names")]
+            [JsonProperty("Stand down livestock production if other gather plugins are loaded")]
+            public bool StandDownLivestockProductionIfOtherPlugins = false;
+            [JsonProperty("Other gather plugin names", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<string> OtherGatherPluginNames = new List<string>
             {
                 "GatherManager",
+                "AdvancedGather",
+                "DayNightGather",
+                "ExtraGatherBonuses",
                 "InstantGather",
-                "GatherControl",
-                "BetterGather",
-                "GUIGather",
-                "GatherMultiplier"
+                "Loottable"
             };
 
             #region v4.1.7 Configuration Migration
@@ -589,6 +630,28 @@ namespace Oxide.Plugins
             public Dictionary<string, NpcHarvestSettings> NpcHarvest = new Dictionary<string, NpcHarvestSettings>(StringComparer.OrdinalIgnoreCase);
             [JsonProperty("Quarry Harvest")]
             public Dictionary<string, QuarryHarvestSettings> QuarryHarvest = new Dictionary<string, QuarryHarvestSettings>(StringComparer.OrdinalIgnoreCase);
+            [JsonProperty("Livestock Production")]
+            public Dictionary<string, LivestockProductionSettings> LivestockProduction = new Dictionary<string, LivestockProductionSettings>(StringComparer.OrdinalIgnoreCase);
+
+            [OnSerializing]
+            private void PrepareGatherSerialization(StreamingContext context)
+            {
+                // The section, rather than a customizable prefab path, determines the JSON shape.
+                foreach (var settings in new[] { Stone, Metal, Sulfur, HQM, WoodPile, Cactus, Tree })
+                    if (settings != null) settings.IsPickup = false;
+
+                if (LivestockProduction == null) return;
+                foreach (var pair in LivestockProduction)
+                {
+                    var settings = pair.Value;
+                    if (settings == null) continue;
+                    bool cow = string.Equals(pair.Key, LIVESTOCK_COW_PREFAB, StringComparison.OrdinalIgnoreCase);
+                    bool bull = string.Equals(pair.Key, LIVESTOCK_BULL_PREFAB, StringComparison.OrdinalIgnoreCase);
+                    bool sheep = string.Equals(pair.Key, LIVESTOCK_SHEEP_PREFAB, StringComparison.OrdinalIgnoreCase);
+                    // Unknown keys retain all fields, so this version does not prune custom entries.
+                    settings.PrepareSerialization(cow || (!bull && !sheep), sheep || (!cow && !bull));
+                }
+            }
 
             private static OreTypeSettings WithGather(OreTypeSettings settings, params OreGatherOutput[] outputs)
             {
@@ -857,41 +920,66 @@ namespace Oxide.Plugins
                 Enabled = false,
                 BiomeProbabilities = new OreBiomeProbabilities { AridBiome = 0.3f, TemperateBiome = 0.35f, ArcticBiome = 0.25f, TundraBiome = 0.3f, JungleBiome = 0.3f }
             };
+
+            [OnSerializing]
+            private void PreparePickupSerialization(StreamingContext context)
+            {
+                foreach (var settings in new[]
+                {
+                    Stone, Metal, Sulfur, Wood, Hemp, BerryBlack, BerryBlue, BerryGreen,
+                    BerryRed, BerryWhite, BerryYellow, Mushroom, Corn, Potato, Pumpkin,
+                    Orchid, Rose, Sunflower, Wheat, HQM, Coconut, Diesel, HalloweenBone,
+                    HalloweenMetal, HalloweenStone, HalloweenSulfur, HalloweenWood
+                })
+                    if (settings != null) settings.IsPickup = true;
+            }
         }
 
         public class OreTypeSettings
         {
+            // Set by the containing config before writing; legacy fields remain readable.
+            [JsonIgnore]
+            public bool IsPickup;
             [JsonProperty("Grid Size")]
             public float GridSize;
             [JsonProperty("Prefab Path")]
             public string Prefab;
             [JsonProperty("Biome Probabilities")]
             public OreBiomeProbabilities BiomeProbabilities = new OreBiomeProbabilities();
+            // Custom spawning only; gather/pickup overrides have separate switches.
             [JsonProperty("Enabled")]
             public bool Enabled = true;
-            [JsonProperty("Bonus Loot")]
+            [JsonProperty("Bonus Loot", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OreBonusLootEntry> BonusLoot = new List<OreBonusLootEntry>();
             [JsonProperty("Override Gather Amounts")]
             public bool OverrideGatherAmounts;
             [JsonProperty("Gather Multiplier")]
             public float GatherMultiplier = 1f;
-            [JsonProperty("Gather Outputs")]
+            [JsonProperty("Gather Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OreGatherOutput> GatherOutputs = new List<OreGatherOutput>();
             [JsonProperty("Override Pickup Amounts")]
             public bool OverridePickupAmounts;
-            [JsonProperty("Pickup Outputs")]
+            [JsonProperty("Pickup Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OrePickupOutput> PickupOutputs = new List<OrePickupOutput>();
             [JsonProperty("Pickup Min Amount")]
             public int PickupMinAmount;
             [JsonProperty("Pickup Max Amount")]
             public int PickupMaxAmount;
+
+            public bool ShouldSerializeOverrideGatherAmounts() => !IsPickup;
+            public bool ShouldSerializeGatherMultiplier() => !IsPickup;
+            public bool ShouldSerializeGatherOutputs() => !IsPickup;
+            public bool ShouldSerializeOverridePickupAmounts() => IsPickup;
+            public bool ShouldSerializePickupOutputs() => IsPickup;
+            public bool ShouldSerializePickupMinAmount() => IsPickup && PickupMaxAmount > 0;
+            public bool ShouldSerializePickupMaxAmount() => IsPickup && PickupMaxAmount > 0;
         }
 
         public class NpcHarvestSettings
         {
             [JsonProperty("Override Gather Amounts")]
             public bool OverrideGatherAmounts;
-            [JsonProperty("Gather Outputs")]
+            [JsonProperty("Gather Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<OreGatherOutput> GatherOutputs = new List<OreGatherOutput>();
         }
 
@@ -899,8 +987,16 @@ namespace Oxide.Plugins
         {
             [JsonProperty("Override Gather Amounts")]
             public bool OverrideGatherAmounts;
-            [JsonProperty("Outputs")]
+            [JsonProperty("Outputs", ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<QuarryHarvestOutput> Outputs = new List<QuarryHarvestOutput>();
+            // Only the Giant Excavator container has modes. Legacy scalar fields
+            // stay readable so existing amounts can migrate into those sections.
+            [JsonProperty("Mining Modes", ObjectCreationHandling = ObjectCreationHandling.Replace)]
+            public Dictionary<string, QuarryHarvestSettings>? MiningModes;
+
+            public bool ShouldSerializeMiningModes() => MiningModes != null;
+            public bool ShouldSerializeOverrideGatherAmounts() => MiningModes == null;
+            public bool ShouldSerializeOutputs() => MiningModes == null;
         }
 
         public class QuarryHarvestOutput
@@ -909,6 +1005,133 @@ namespace Oxide.Plugins
             public string Shortname = string.Empty;
             [JsonProperty("Amount")]
             public int Amount;
+        }
+
+        public class LivestockGeneProduction
+        {
+            [JsonIgnore]
+            public bool SupportsMilk = true;
+            [JsonIgnore]
+            public bool SupportsWool = true;
+            // Track omitted fields separately from explicit values, including zero
+            // and old defaults. The containing Bad/Ok/Good tier supplies defaults.
+            private int? _milkAmount, _woolAmount, _dungAmount;
+            private float? _milkCooldownSeconds, _woolCooldownSeconds, _dungIntervalSeconds;
+            [JsonProperty("Milk Amount")]
+            public int MilkAmount { get => _milkAmount ?? 1; set => _milkAmount = value; }
+            [JsonProperty("Milk Cooldown Seconds")]
+            public float MilkCooldownSeconds { get => _milkCooldownSeconds ?? 300f; set => _milkCooldownSeconds = value; }
+            [JsonProperty("Wool Amount")]
+            public int WoolAmount { get => _woolAmount ?? 10; set => _woolAmount = value; }
+            [JsonProperty("Wool Cooldown Seconds")]
+            public float WoolCooldownSeconds { get => _woolCooldownSeconds ?? 300f; set => _woolCooldownSeconds = value; }
+            [JsonProperty("Dung Amount")]
+            public int DungAmount { get => _dungAmount ?? 1; set => _dungAmount = value; }
+            [JsonProperty("Dung Interval Seconds")]
+            public float DungIntervalSeconds { get => _dungIntervalSeconds ?? 1200f; set => _dungIntervalSeconds = value; }
+
+            internal bool HasAllValues => _milkAmount.HasValue && _woolAmount.HasValue && _dungAmount.HasValue
+                && _milkCooldownSeconds.HasValue && _woolCooldownSeconds.HasValue && _dungIntervalSeconds.HasValue;
+
+            internal void ApplyDefaults(LivestockGeneProduction defaults)
+            {
+                _milkAmount ??= defaults.MilkAmount;
+                _milkCooldownSeconds ??= defaults.MilkCooldownSeconds;
+                _woolAmount ??= defaults.WoolAmount;
+                _woolCooldownSeconds ??= defaults.WoolCooldownSeconds;
+                _dungAmount ??= defaults.DungAmount;
+                _dungIntervalSeconds ??= defaults.DungIntervalSeconds;
+            }
+
+            public bool ShouldSerializeMilkAmount() => SupportsMilk;
+            public bool ShouldSerializeMilkCooldownSeconds() => SupportsMilk;
+            public bool ShouldSerializeWoolAmount() => SupportsWool;
+            public bool ShouldSerializeWoolCooldownSeconds() => SupportsWool;
+        }
+
+        public class LivestockProductionSettings
+        {
+            [JsonProperty("Override Production")]
+            public bool OverrideProduction;
+            // Nullable migration fields distinguish an omitted value from an explicit Ok-tier default.
+            [JsonProperty("Milk Amount", NullValueHandling = NullValueHandling.Ignore)]
+            public int? MilkAmount;
+            [JsonProperty("Milk Cooldown Seconds", NullValueHandling = NullValueHandling.Ignore)]
+            public float? MilkCooldownSeconds;
+            [JsonProperty("Wool Amount", NullValueHandling = NullValueHandling.Ignore)]
+            public int? WoolAmount;
+            [JsonProperty("Wool Cooldown Seconds", NullValueHandling = NullValueHandling.Ignore)]
+            public float? WoolCooldownSeconds;
+            [JsonProperty("Dung Amount", NullValueHandling = NullValueHandling.Ignore)]
+            public int? DungAmount;
+            [JsonProperty("Dung Interval Seconds", NullValueHandling = NullValueHandling.Ignore)]
+            public float? DungIntervalSeconds;
+            [JsonProperty("Bad")]
+            public LivestockGeneProduction Bad;
+            [JsonProperty("Ok")]
+            public LivestockGeneProduction Ok;
+            [JsonProperty("Good")]
+            public LivestockGeneProduction Good;
+
+            public bool ShouldSerializeMilkAmount() => Bad == null;
+            public bool ShouldSerializeMilkCooldownSeconds() => Bad == null;
+            public bool ShouldSerializeWoolAmount() => Bad == null;
+            public bool ShouldSerializeWoolCooldownSeconds() => Bad == null;
+            public bool ShouldSerializeDungAmount() => Bad == null;
+            public bool ShouldSerializeDungIntervalSeconds() => Bad == null;
+
+            public static LivestockGeneProduction VanillaTier(LivestockGeneTier tier)
+            {
+                if (tier == LivestockGeneTier.Bad)
+                    return new LivestockGeneProduction { MilkAmount = 1, MilkCooldownSeconds = 500f, WoolAmount = 6, WoolCooldownSeconds = 500f, DungAmount = 1, DungIntervalSeconds = 2000f };
+                if (tier == LivestockGeneTier.Good)
+                    return new LivestockGeneProduction { MilkAmount = 2, MilkCooldownSeconds = 187.5f, WoolAmount = 16, WoolCooldownSeconds = 187.5f, DungAmount = 1, DungIntervalSeconds = 750f };
+                return new LivestockGeneProduction { MilkAmount = 1, MilkCooldownSeconds = 300f, WoolAmount = 10, WoolCooldownSeconds = 300f, DungAmount = 1, DungIntervalSeconds = 1200f };
+            }
+
+            public void EnsureGeneTiers()
+            {
+                if (Bad?.HasAllValues == true && Ok?.HasAllValues == true && Good?.HasAllValues == true) return;
+                Bad ??= CopyTier(LivestockGeneTier.Bad);
+                Ok ??= CopyTier(LivestockGeneTier.Ok);
+                Good ??= CopyTier(LivestockGeneTier.Good);
+                if (!Bad.HasAllValues) Bad.ApplyDefaults(CopyTier(LivestockGeneTier.Bad));
+                if (!Ok.HasAllValues) Ok.ApplyDefaults(CopyTier(LivestockGeneTier.Ok));
+                if (!Good.HasAllValues) Good.ApplyDefaults(CopyTier(LivestockGeneTier.Good));
+            }
+
+            public void PrepareSerialization(bool supportsMilk, bool supportsWool)
+            {
+                // LoadFile saves immediately after reading, before runtime defaults are initialized.
+                EnsureGeneTiers();
+                foreach (var tier in new[] { Bad, Ok, Good })
+                {
+                    tier.SupportsMilk = supportsMilk;
+                    tier.SupportsWool = supportsWool;
+                }
+            }
+
+            public LivestockGeneProduction ForTier(LivestockGeneTier tier)
+            {
+                EnsureGeneTiers();
+                if (tier == LivestockGeneTier.Bad) return Bad;
+                if (tier == LivestockGeneTier.Good) return Good;
+                return Ok;
+            }
+
+            private LivestockGeneProduction CopyTier(LivestockGeneTier tier)
+            {
+                var vanilla = VanillaTier(tier);
+                return new LivestockGeneProduction
+                {
+                    MilkAmount = MilkAmount ?? vanilla.MilkAmount,
+                    MilkCooldownSeconds = MilkCooldownSeconds ?? vanilla.MilkCooldownSeconds,
+                    WoolAmount = WoolAmount ?? vanilla.WoolAmount,
+                    WoolCooldownSeconds = WoolCooldownSeconds ?? vanilla.WoolCooldownSeconds,
+                    DungAmount = DungAmount ?? vanilla.DungAmount,
+                    DungIntervalSeconds = DungIntervalSeconds ?? vanilla.DungIntervalSeconds
+                };
+            }
         }
 
         public class OreGatherOutput
@@ -1267,6 +1490,44 @@ namespace Oxide.Plugins
             return itemDefinition?.GetComponentInChildren<ItemModUnwrap>();
         }
 
+        private static bool DeduplicateOtherGatherPluginNames(PluginConfig config)
+        {
+            if (config == null || config.Generic == null)
+                return false;
+
+            var names = config.Generic.OtherGatherPluginNames;
+            if (names == null || names.Count == 0)
+                return false;
+
+            var unique = new List<string>(names.Count);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var name in names)
+            {
+                if (string.IsNullOrWhiteSpace(name))
+                    continue;
+                var trimmed = name.Trim();
+                if (seen.Add(trimmed))
+                    unique.Add(trimmed);
+            }
+
+            if (unique.Count == names.Count)
+            {
+                for (int i = 0; i < unique.Count; i++)
+                {
+                    if (!string.Equals(unique[i], names[i], StringComparison.Ordinal))
+                    {
+                        config.Generic.OtherGatherPluginNames = unique;
+                        return true;
+                    }
+                }
+
+                return false;
+            }
+
+            config.Generic.OtherGatherPluginNames = unique;
+            return true;
+        }
+
         protected override void LoadDefaultConfig() => _config = new PluginConfig();
 
         protected override void LoadConfig()
@@ -1276,6 +1537,7 @@ namespace Oxide.Plugins
             try
             {
                 var raw = Config.ReadObject<JObject>() ?? new JObject();
+                _legacyConfigOreSpawnToken = raw["Ore Spawn Configuration"]?.DeepClone();
                 if (raw["Ore Spawn Configuration"] is JObject oreToken)
                 {
                     try
@@ -1287,18 +1549,19 @@ namespace Oxide.Plugins
                         Log($"Could not migrate Ore Spawn Configuration from BetterLoot.json: {ex.Message}");
                     }
 
-                    raw.Remove("Ore Spawn Configuration");
-                    Config.WriteObject(raw, true);
-                    Log("Moved Ore Spawn settings out of BetterLoot.json. They now live in oxide/data/BetterLoot/GatherRates.json");
+                    // Keep the source until GatherRates has been durably saved.
                 }
 
                 _config = raw.ToObject<PluginConfig>() ?? new PluginConfig();
 
-                if (MaybeUpdateConfig(_config))
-                {
+                bool outdated = MaybeUpdateConfig(_config);
+                bool namesChanged = DeduplicateOtherGatherPluginNames(_config);
+                if (outdated)
                     Log("Configuration appears to be outdated; updating and saving Better Loot");
+                if (namesChanged)
+                    Log("Removed duplicate entries from Other gather plugin names.");
+                if (outdated || namesChanged)
                     SaveConfig();
-                }
 
                 Log("Loaded configuration!");
             }
@@ -1311,7 +1574,10 @@ namespace Oxide.Plugins
         protected override void SaveConfig()
         {
             Log($"Configuration changes saved to {nameof(BetterLoot)}.json");
-            Config.WriteObject(_config, true);
+            var raw = JObject.FromObject(_config);
+            if (_legacyConfigOreSpawnToken is not null)
+                raw["Ore Spawn Configuration"] = _legacyConfigOreSpawnToken.DeepClone();
+            Config.WriteObject(raw, true);
         }
 
         #region Configuration Updater
@@ -1390,9 +1656,11 @@ namespace Oxide.Plugins
             UniqueTagREGEX = new Regex(@"\{\d+\}", RegexOptions.Compiled);
             
             DataSystem.LoadBlacklist();
+            // Read embedded legacy gather settings before LoadLootTables rewrites
+            // LootTables.json using its current, loot-only schema.
+            DataSystem.LoadOreSpawn();
             DataSystem.LoadLootTables();
             DataSystem.LoadLootGroups();
-            DataSystem.LoadOreSpawn();
         }
 
         private void OnServerInitialized()
@@ -1410,6 +1678,7 @@ namespace Oxide.Plugins
                 Unsubscribe(nameof(OnDispenserGather));
                 Unsubscribe(nameof(OnDispenserBonus));
                 Unsubscribe(nameof(OnCollectiblePickup));
+                Unsubscribe(nameof(OnCollectiblePickedup));
                 Unsubscribe(nameof(OnEntityKill));
                 Unsubscribe(nameof(OnEntitySpawned));
                 Unsubscribe(nameof(OnMeleeAttack));
@@ -1453,6 +1722,7 @@ namespace Oxide.Plugins
 
         private void Unload()
         {
+            RefreshLivestockProductionTimers(restoreVanilla: true);
             // Static variable instances
             UniqueTagREGEX = null;
 
@@ -1471,6 +1741,7 @@ namespace Oxide.Plugins
 
             // Static BetterLoot instance
             _instance = null;
+            _manifestPrefabPaths = null;
             _config = null;
 
             ShutdownOreSpawnSystem();
@@ -1495,9 +1766,9 @@ namespace Oxide.Plugins
         {
             public LootyTarget looty = new ();
             [JsonProperty("LootTable")]
-            public Dictionary<string, PrefabLoot> LootTables = new();
+            public Dictionary<string, PrefabLoot>? LootTables;
             [JsonProperty("Loot Groups")]
-            public Dictionary<string, LootProfile>? LootGroups = new();
+            public Dictionary<string, LootProfile>? LootGroups;
             [JsonProperty("Ore Spawn")]
             public OreSpawnConfiguration? OreSpawn;
             [JsonProperty("Gather Rates")]
@@ -1594,9 +1865,9 @@ namespace Oxide.Plugins
                     Log($"Validating LootGroup: \"{profileName}\"");
 
                     // NRE Data Check
-                    if (profileData.ItemList is null)
+                    if (profileData is null || HasInvalidLootProfile(profileData))
                     {
-                        Log("- Error: Profile item list is null. Skipping...");
+                        Log("- Error: Profile contains a missing item list or item amount. Skipping...");
                         continue;
                     }
 
@@ -1604,8 +1875,8 @@ namespace Oxide.Plugins
                     List<string> invalidItemPrefabs = Pool.Get<List<string>>();
                     invalidItemPrefabs.AddRange(profileData.ItemList.Keys.Where(key => !ItemManager.itemDictionaryByName.ContainsKey(UniqueTagREGEX.Replace(key.ToLower(), string.Empty))));
 
-                    if (profileData.ItemList.RemoveAll(invalidItemPrefabs.Contains) is int removeCount && removeCount > 0)
-                        Log($"Error - Removing {removeCount} invalid entries. Please check item names that were not found in the games item dictionary: ({string.Join(", ", invalidItemPrefabs)})");
+                    if (invalidItemPrefabs.Count > 0)
+                        Log($"Unresolved items retained for future game updates: ({string.Join(", ", invalidItemPrefabs)})");
 
                     Pool.FreeUnmanaged(ref invalidItemPrefabs);
 
@@ -1615,13 +1886,15 @@ namespace Oxide.Plugins
                         // Balance loot percentages
                         if (_config.LootGroupsConfig.EnableProbabilityBalancing)
                         {
+                            foreach (var item in profileData.ItemList.Values)
+                                item.Probability = ValidProbability(item.Probability);
                             double GetSum() => profileData.ItemList.Sum(x => x.Value.Probability);
                             double Round(double x) => Math.Round(x, 2);
 
                             const double target = 100;
                             double sum = GetSum();
 
-                            if (Math.Abs(target - sum) > 1e-3)
+                            if (sum > 0 && Math.Abs(target - sum) > 1e-3)
                             {
                                 Log($"- Profile probability sum ({sum}) != 100. Balancing profile!");
 
@@ -1644,7 +1917,7 @@ namespace Oxide.Plugins
                                 }
 
                                 var largestEntry = profileData.ItemList[largestKey];
-                                largestEntry.Probability = Round(largestEntry.Probability - Round(target - GetSum()));
+                                largestEntry.Probability = Round(largestEntry.Probability + Round(target - GetSum()));
                             }
                         }
                         else
@@ -1728,7 +2001,13 @@ namespace Oxide.Plugins
                 bool existedLegacy = Interface.Oxide.DataFileSystem.ExistsDatafile(OreDataPath(OS_FN_LEGACY));
                 if (existedLegacy)
                 {
-                    LoadFile(OS_FN_LEGACY, (spawnData) => CheckNull(ref spawnData, ref oreSpawnData, spawnData?.OreSpawn), ref oreSpawnData);
+                    var legacyRaw = Interface.Oxide.DataFileSystem.ReadObject<JObject>(OreDataPath(OS_FN_LEGACY));
+                    if ((legacyRaw?["Gather Rates"] ?? legacyRaw?["Ore Spawn"]) is not JObject)
+                        throw new InvalidDataException("Legacy OreSpawn.json has no gather configuration; source retained.");
+                    var legacy = legacyRaw.ToObject<OreSpawnData>();
+                    if (legacy?.OreSpawn is null)
+                        throw new InvalidDataException("Legacy OreSpawn.json has no gather configuration; source retained.");
+                    oreSpawnData = legacy;
                     SaveOreSpawn();
                     TryDeleteDataFile(OS_FN_LEGACY);
                     Log("Renamed oxide/data/BetterLoot/OreSpawn.json to GatherRates.json");
@@ -1740,6 +2019,12 @@ namespace Oxide.Plugins
                 {
                     oreSpawnData = new OreSpawnData { OreSpawn = migrated };
                     SaveOreSpawn();
+                    if (_instance?._legacyConfigOreSpawn is not null)
+                    {
+                        _instance._legacyConfigOreSpawn = null;
+                        _instance._legacyConfigOreSpawnToken = null;
+                        _instance.SaveConfig();
+                    }
                     Log("Migrated Ore Spawn settings into GatherRates.json");
                     return;
                 }
@@ -1776,19 +2061,94 @@ namespace Oxide.Plugins
 
                     var raw = Interface.Oxide.DataFileSystem.ReadObject<JObject>(path);
                     var token = raw?["Gather Rates"] ?? raw?["Ore Spawn"] ?? raw?["Ore Spawn Configuration"];
-                    return token?.Type == JTokenType.Object ? token.ToObject<OreSpawnConfiguration>() : null;
+                    if (token == null) return null;
+                    if (token.Type != JTokenType.Object)
+                        throw new InvalidDataException("Embedded gather settings must be a JSON object; source retained.");
+                    return token.ToObject<OreSpawnConfiguration>();
                 }
                 catch (Exception ex)
                 {
                     Log($"Could not read leftover Ore Spawn settings from LootTables.json: {ex.Message}");
-                    return null;
+                    // Stop startup before the loot-only loader can rewrite this source.
+                    throw;
                 }
             }
             #endregion
             #endregion
 
             #region DataFile Error Backup
-            public static void BakDataFile(string filename, bool isRestoring = false, BasePlayer? msgPlayer = null)
+            internal static void RunFileTransaction(string[] filenames, Action write)
+            {
+                var paths = filenames.Select(name => Path.Combine(Interface.Oxide.DataFileSystem.Directory, $"{nameof(BetterLoot)}/{name}.json")).ToArray();
+                RestoreFilesOnFailure(paths, write);
+            }
+
+            internal static void RestoreFilesOnFailure(string[] paths, Action write)
+            {
+                var previous = paths.Select(path => File.Exists(path) ? File.ReadAllBytes(path) : null).ToArray();
+                try { write(); }
+                catch (Exception original)
+                {
+                    var failures = new List<Exception> { original };
+                    for (int i = 0; i < paths.Length; i++)
+                    {
+                        try
+                        {
+                            if (previous[i] is null) File.Delete(paths[i]);
+                            else File.WriteAllBytes(paths[i], previous[i]);
+                        }
+                        catch (Exception rollback) { failures.Add(rollback); }
+                    }
+                    throw new AggregateException("File transaction failed; rollback attempted for all files.", failures);
+                }
+            }
+
+            public static void BackupOrRestoreAll(bool restore, BasePlayer? player = null)
+            {
+                string[] names = { "LootTables", "LootGroups", "Blacklist", "GatherRates" };
+                if (restore)
+                {
+                    string ReadBackup(string name) => File.ReadAllText(Path.Combine(Interface.Oxide.DataFileSystem.Directory, $"{nameof(BetterLoot)}/{name}.json.bak"));
+                    if (JObject.Parse(ReadBackup("LootTables"))["LootTables"] is not JObject ||
+                        JObject.Parse(ReadBackup("LootGroups"))["Loot Groups"] is not JObject ||
+                        JObject.Parse(ReadBackup("Blacklist"))["ItemList"] is not JArray ||
+                        (JObject.Parse(ReadBackup("GatherRates"))["Gather Rates"] ?? JObject.Parse(ReadBackup("GatherRates"))["Ore Spawn"]) is not JObject)
+                        throw new InvalidDataException("Backup files are missing required configuration sections.");
+                    var tables = JsonConvert.DeserializeObject<LootTableData>(ReadBackup("LootTables"));
+                    var groups = JsonConvert.DeserializeObject<LootGroupsData>(ReadBackup("LootGroups"));
+                    var blacklist = JsonConvert.DeserializeObject<StoredBlacklist>(ReadBackup("Blacklist"));
+                    var gather = JsonConvert.DeserializeObject<OreSpawnData>(ReadBackup("GatherRates"));
+                    if (tables?.LootTables is null || tables.LootTables.Any(x => x.Value is null) ||
+                        groups?.LootGroups is null || groups.LootGroups.Values.Any(HasInvalidLootProfile) ||
+                        blacklist?.ItemList is null || gather?.OreSpawn is null)
+                        throw new InvalidDataException("Invalid backup set; current files retained.");
+                    var oldTables = lootTables; var oldGroups = lootGroups; var oldBlacklist = storedBlacklist; var oldGather = oreSpawnData;
+                    var oldConfig = JsonConvert.SerializeObject(_config);
+                    try
+                    {
+                        RunFileTransaction(names, () =>
+                        {
+                            foreach (string name in names) BakDataFile(name, true, player, false);
+                            lootTables = tables; lootGroups = groups; storedBlacklist = blacklist; oreSpawnData = gather;
+                            LootGroupsData.ValidateGroups(lootGroups);
+                            _instance.InitLootSystem(true);
+                            _instance.RestartOreSpawnSystem();
+                        });
+                    }
+                    catch
+                    {
+                        lootTables = oldTables; lootGroups = oldGroups; storedBlacklist = oldBlacklist; oreSpawnData = oldGather;
+                        _config = JsonConvert.DeserializeObject<PluginConfig>(oldConfig);
+                        _instance.SaveConfig();
+                        try { _instance.InitLootSystem(true); _instance.RestartOreSpawnSystem(); }
+                        catch (Exception recovery) { Log($"Backup rollback runtime recovery failed: {recovery}"); }
+                        throw;
+                    }
+                }
+                else foreach (string name in names) BakDataFile(name, false, player);
+            }
+
+            public static void BakDataFile(string filename, bool isRestoring = false, BasePlayer? msgPlayer = null, bool reload = true)
             {
                 // Move these to lang
                 const string NoRestoreFileFound = "No backup file to restore.";
@@ -1821,10 +2181,7 @@ namespace Oxide.Plugins
                         return;
                     }
                         
-                    if (File.Exists(bakFilePath))
-                        File.Delete(bakFilePath);
-                    
-                    File.Copy(dataFilePath, bakFilePath);
+                    File.Copy(dataFilePath, bakFilePath, true);
                 } else
                 {
                     if (!File.Exists(bakFilePath))
@@ -1833,16 +2190,21 @@ namespace Oxide.Plugins
                         return;
                     }
                     
-                    if (File.Exists(dataFilePath))
-                        File.Delete(dataFilePath);
-                    
-                    File.Copy(bakFilePath, dataFilePath);
+                    // Deserialize before replacing a working file with a malformed backup.
+                    JObject.Parse(File.ReadAllText(bakFilePath));
+                    File.Copy(bakFilePath, dataFilePath, true);
                 }
                 
                 if (isRestoring)
                 {
                     Respond(FileRestored);
+                    if (!reload) return;
+                    LoadBlacklist();
+                    LoadLootTables();
+                    LoadLootGroups();
+                    LoadOreSpawn();
                     _instance.InitLootSystem(true);
+                    _instance.RestartOreSpawnSystem();
                 } else
                 {
                     Respond(BackupTaken);
@@ -1943,10 +2305,11 @@ namespace Oxide.Plugins
 
             public void UpdateProbabilities(IEnumerable<double> probabilities)
             {
+                _culminativeProbabilities.Clear();
                 double _culminative = 0;
-                foreach (int item in probabilities)
+                foreach (double item in probabilities)
                 {
-                    _culminative += item;
+                    _culminative += ValidProbability(item);
                     _culminativeProbabilities.Add(_culminative);
                 }
             }
@@ -1954,13 +2317,24 @@ namespace Oxide.Plugins
             public int GetRandomIndex()
             {
                 double randomSelect = RNG.NextDouble() * 1e2;
-                int elementIndex = _culminativeProbabilities.BinarySearch(randomSelect);
-
-                if (elementIndex < 0)
-                    elementIndex = ~elementIndex;
-
-                return elementIndex;
+                return SelectProbabilityIndex(_culminativeProbabilities, randomSelect);
             }
+        }
+
+        private static double ValidProbability(double value)
+            => double.IsNaN(value) || double.IsInfinity(value) || value < 0 ? 0 : Math.Min(value, 100);
+
+        // Upper bound: a zero-weight entry must never win, including at random == 0.
+        private static int SelectProbabilityIndex(List<double> cumulative, double random)
+        {
+            int low = 0, high = cumulative.Count;
+            while (low < high)
+            {
+                int middle = low + (high - low) / 2;
+                if (cumulative[middle] <= random) low = middle + 1;
+                else high = middle;
+            }
+            return low;
         }
         #endregion
 
@@ -2017,10 +2391,10 @@ namespace Oxide.Plugins
             [JsonProperty("Extra Spawns")]
             public int ExtraSpawns;
 
-            [JsonProperty("Items", NullValueHandling = NullValueHandling.Ignore)]
+            [JsonProperty("Items", NullValueHandling = NullValueHandling.Ignore, ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<VanillaLootItem>? Items;
 
-            [JsonProperty("SubSpawn", NullValueHandling = NullValueHandling.Ignore)]
+            [JsonProperty("SubSpawn", NullValueHandling = NullValueHandling.Ignore, ObjectCreationHandling = ObjectCreationHandling.Replace)]
             public List<VanillaLootNode>? SubSpawn;
 
             public bool ShouldSerializeName() => !string.IsNullOrWhiteSpace(Name);
@@ -2233,7 +2607,7 @@ namespace Oxide.Plugins
                     return null;
                 }
 
-                if (!profile.Enabled)
+                if (HasInvalidLootProfile(profile) || !profile.Enabled)
                 {
                     selectedProfileName = null;
                     return null;
@@ -2252,14 +2626,12 @@ namespace Oxide.Plugins
                 cumulatives.Clear();
                 for (int i = 0; i < imports.Count; i++)
                 {
-                    cumulative += imports[i].LootProfileProbability;
+                    cumulative += ValidProbability(imports[i].LootProfileProbability);
                     cumulatives.Add(cumulative);
                 }
 
                 double randomSelect = RNG.NextDouble() * 1e2;
-                int elementIndex = cumulatives.BinarySearch(randomSelect);
-                if (elementIndex < 0)
-                    elementIndex = ~elementIndex;
+                int elementIndex = SelectProbabilityIndex(cumulatives, randomSelect);
 
                 if (elementIndex >= imports.Count)
                     return null;
@@ -2392,6 +2764,7 @@ namespace Oxide.Plugins
             /// </summary>
             public (ItemConvertInfo?, List<ItemConvertInfo>?) GetItem(HashSet<string> currentItemEntries)
             {
+                if (HasInvalidLootProfile(this)) return (null, null);
                 var orderedItems = GetOrderedItems();
                 int itemIndex = GetRandomIndex();
 
@@ -2401,6 +2774,7 @@ namespace Oxide.Plugins
 
                 List<ItemConvertInfo>? bonusItems = null;
                 var entry = orderedItems[itemIndex];
+                if (entry.Value?.Amount is null) return (null, null);
 
                 if (!entry.Value.Amount.allowDuplicates && currentItemEntries.Contains(entry.Key))
                 {
@@ -2415,19 +2789,24 @@ namespace Oxide.Plugins
 
                     // Set entry to the entry of the nudged index
                     entry = orderedItems[itemIndex];
+                    if (entry.Value?.Amount is null) return (null, null);
+                    if (ValidProbability(entry.Value.Probability) <= 0d
+                        || (!entry.Value.Amount.allowDuplicates && currentItemEntries.Contains(entry.Key)))
+                        return (null, null);
                 }
-
-                entry.Value.Amount.CreateBonusItems(ref bonusItems);
 
                 // Create Item
                 string sanitizedName = StripUniqueTag(entry.Key);
                 Item item = ItemManager.CreateByPartialName(sanitizedName, GetRNG(entry.Value.Amount.Min, entry.Value.Amount.Max), entry.Value.Amount.SkinId);
                 
                 // Apply custom properties
-                entry.Value.Amount.ApplyAllProperties(item);
-
                 if (item is null)
+                {
                     Log($"ERROR: item \"{entry.Key}\" could not be created! System returned null entry!");
+                    return (null, null);
+                }
+                entry.Value.Amount.ApplyAllProperties(item);
+                entry.Value.Amount.CreateBonusItems(ref bonusItems);
 
                 // Add for future duplicate checking.
                 currentItemEntries.Add(entry.Key);
@@ -2436,6 +2815,12 @@ namespace Oxide.Plugins
             }
             #endregion
         }
+
+        private static bool HasInvalidLootProfile(LootProfile? profile)
+            => profile is null || profile.ItemList is null
+                || profile.GuaranteedItems?.Values.Any(item => item is null) == true
+                || profile.ItemList.Values.Any(item => item is null || item.Amount is null
+                    || item.Amount.additionalItems?.Values.Any(bonus => bonus is null) == true);
 
         #region Loot Entry
         public class LootEntrySettings
@@ -2501,6 +2886,7 @@ namespace Oxide.Plugins
                         // Attempt to regenerate if there is a duplicate
                         if (itemMod.MoveToContainer(item.contents))
                             break;
+                        itemMod.Remove();
                     }
                 }
             }
@@ -2659,6 +3045,8 @@ namespace Oxide.Plugins
 
                 AttachmentSettings.maxModAmount = Math.Clamp(AttachmentSettings.maxModAmount, 1, maxMods);
 
+                foreach (var item in AttachmentSettings.itemMods.Values)
+                    item.Probability = ValidProbability(item.Probability);
                 double GetSum() => AttachmentSettings.itemMods.Sum(x => x.Value.Probability);
                 double Round(double x) => Math.Round(x, 2);
 
@@ -2688,16 +3076,17 @@ namespace Oxide.Plugins
                     }
 
                     var largestEntry = AttachmentSettings.itemMods[largestKey];
-                    largestEntry.Probability = Round(largestEntry.Probability - Round(target - GetSum()));
+                    largestEntry.Probability = Round(largestEntry.Probability + Round(target - GetSum()));
                 }
             }
 
             public void UpdateProbabilities()
             {
+                _culminativeProbabilities.Clear();
                 double _culminative = 0;
                 foreach (var item in AttachmentSettings.itemMods.Values)
                 {
-                    _culminative += item.Probability;
+                    _culminative += ValidProbability(item.Probability);
                     _culminativeProbabilities.Add(_culminative);
                 }
             }
@@ -2709,10 +3098,7 @@ namespace Oxide.Plugins
                     UpdateProbabilities();
 
                 double randomSelect = RNG.NextDouble() * 1e2;
-                int itemIndex = _culminativeProbabilities.BinarySearch(randomSelect);
-
-                if (itemIndex < 0)
-                    itemIndex = ~itemIndex;
+                int itemIndex = SelectProbabilityIndex(_culminativeProbabilities, randomSelect);
 
                 // No item found
                 if (itemIndex >= AttachmentSettings.itemMods.Count)
@@ -3219,7 +3605,7 @@ namespace Oxide.Plugins
                 if (IsMissionKey(prefab))
                     return new List<VanillaLootSlot>();
 
-                GameObject? basePrefab = GameManager.server.FindPrefab(prefab);
+                GameObject? basePrefab = FindLoadedPrefab(prefab);
                 if (basePrefab is null)
                     return new List<VanillaLootSlot>();
 
@@ -3511,7 +3897,7 @@ namespace Oxide.Plugins
                         continue;
                     }
 
-                    var basePrefab = GameManager.server.FindPrefab(lootPrefab);
+                    var basePrefab = FindLoadedPrefab(lootPrefab);
 
                     if (basePrefab is null)
                     {
@@ -3697,12 +4083,8 @@ namespace Oxide.Plugins
             if (missingVanillaTrees > 0)
                 Log($"Warning: {missingVanillaTrees} loot tables have no Vanilla Loot Slots (Facepunch tree empty or prefab not loaded).");
 
-            if (nullTablePrefabs.Count > 0 && _config.Generic.WatchedPrefabs.RemoveAll(nullTablePrefabs.Contains) is int missing && missing > 0)
-            {
-                if (NewConfigGenerated)
-                    Puts($"Removed {missing} invalid / unloaded prefabs from watch list:\n{string.Join(", \n", nullTablePrefabs)}");
-                SaveConfig();
-            }
+            if (nullTablePrefabs.Count > 0)
+                Log($"Unresolved prefabs retained in watch list: {string.Join(", ", nullTablePrefabs)}");
 
             Pool.FreeUnmanaged(ref nullTablePrefabs);
 
@@ -3720,7 +4102,7 @@ namespace Oxide.Plugins
 
             void scanEntry(string itemKey, LootEntrySettings itemEntry, string lootTableKey, ref bool modificationFlag)
             {
-                var defName = UniqueTagREGEX.Replace(itemKey, string.Empty);
+                var defName = UniqueTagREGEX.Replace(itemKey, string.Empty).Replace(".blueprint", string.Empty);
                 
                 // Warning
                 if (!ItemManagerItemNamesList.Contains(defName, StringComparer.OrdinalIgnoreCase))
@@ -3874,16 +4256,23 @@ namespace Oxide.Plugins
             bool modifiedLootGroups = false;
             foreach (var lootProfile in lootGroups.LootGroups.ToList())
             {
+                if (HasInvalidLootProfile(lootProfile.Value))
+                {
+                    Log($"Skipping malformed loot group '{lootProfile.Key}'; saved settings are retained.");
+                    continue;
+                }
                 foreach (var entry in lootProfile.Value.ItemList)
                 {
                     scanEntry(entry.Key, entry.Value.Amount, lootProfile.Key, ref modifiedLootGroups);
 
-                    foreach (var bonusItem in entry.Value.Amount.additionalItems)
-                        scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
+                    if (entry.Value.Amount.additionalItems != null)
+                        foreach (var bonusItem in entry.Value.Amount.additionalItems)
+                            scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
                 }
 
-                foreach (var bonusItem in lootProfile.Value.GuaranteedItems)
-                    scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
+                if (lootProfile.Value.GuaranteedItems != null)
+                    foreach (var bonusItem in lootProfile.Value.GuaranteedItems)
+                        scanEntry(bonusItem.Key, bonusItem.Value, lootProfile.Key, ref modifiedLootGroups);
             }
 
             // Build entries for loot tables
@@ -3902,7 +4291,7 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    var basePrefab = GameManager.server.FindPrefab(lootTable.Key);
+                    var basePrefab = FindLoadedPrefab(lootTable.Key);
                     validLootSource = (basePrefab?.HasComponent<global::HumanNPC>() ?? false) ||  // NPC v1
                                       (basePrefab?.HasComponent<ScientistNPC2>() ?? false) || // NPC v2
                                       (basePrefab?.HasComponent<LootContainer>() ?? false) || // Loot Box
@@ -3911,11 +4300,8 @@ namespace Oxide.Plugins
 
                 if (!validLootSource)
                 {
-                    lootTables.LootTables.Remove(lootTable.Key);
-                    Log($"Removed Invalid Loot Table {lootTable.Key}");
-                    modifiedLootTables = true;
-
-                    continue;
+                    // A missing or changed prefab must not erase administrator settings.
+                    Log($"Unresolved loot source retained in LootTables.json: {lootTable.Key}");
                 }
 
                 var container = lootTable.Value;
@@ -4079,7 +4465,7 @@ namespace Oxide.Plugins
                     return true;
                 }
 
-                GameObject? basePrefab = GameManager.server.FindPrefab(prefab);
+                GameObject? basePrefab = FindLoadedPrefab(prefab);
                 if (basePrefab is null)
                     return false;
 
@@ -4275,11 +4661,13 @@ namespace Oxide.Plugins
             deliveredItems = container.itemList.Count;
         }
 
-        private void TryFillFromLootProfile(LootProfile lootProfile, string? profileName,
+        private static void TryFillFromLootProfile(LootProfile lootProfile, string? profileName,
             HashSet<string> currentItemEntries, List<KeyValuePair<string, LootEntrySettings>> guaranteedFromProfile,
             ref ItemConvertInfo? itemInfo, ref List<ItemConvertInfo>? bonusItems,
             ref bool isLootGroupItem, ref string? selectedProfileName)
         {
+            if (HasInvalidLootProfile(lootProfile))
+                return;
             if (!lootProfile.DoProbabilitiesExist)
                 lootProfile.UpdateProbabilities(lootProfile.ItemList.Select(x => x.Value.Probability));
 
@@ -4287,7 +4675,8 @@ namespace Oxide.Plugins
             if (itemInfo == null)
                 return;
 
-            guaranteedFromProfile.AddRange(lootProfile.GuaranteedItems);
+            if (lootProfile.GuaranteedItems != null)
+                guaranteedFromProfile.AddRange(lootProfile.GuaranteedItems);
             isLootGroupItem = true;
             selectedProfileName = profileName;
         }
@@ -4773,9 +5162,9 @@ namespace Oxide.Plugins
             });
 
             var count = spawns.Count;
-            var racelimit = count * count;
+            long racelimit = (long)count * count;
 
-            var antirace = 0;
+            long antirace = 0;
             var deleted = 0;
             const float stackDistSqr = 0.25f * 0.25f;
 
@@ -4797,7 +5186,8 @@ namespace Oxide.Plugins
                     var box2 = spawns[next];
                     var dx = posX - box2.transform.position.x;
                     var dz = posZ - box2.transform.position.z;
-                    var distanceSqr = dx * dx + dz * dz;
+                    var dy = box.transform.position.y - box2.transform.position.y;
+                    var distanceSqr = dx * dx + dy * dy + dz * dz;
 
                     if (++antirace > racelimit)
                     {
@@ -4805,7 +5195,10 @@ namespace Oxide.Plugins
                         return;
                     }
 
-                    if (distanceSqr < stackDistSqr)
+                    if (distanceSqr < stackDistSqr && box.prefabID == box2.prefabID &&
+                        box.OwnerID == 0 && box2.OwnerID == 0 &&
+                        box.GetParentEntity() == null && box2.GetParentEntity() == null &&
+                        Quaternion.Angle(box.transform.rotation, box2.transform.rotation) < 1f)
                     {
                         spawns.RemoveAt(next);
                         count--;
@@ -4816,8 +5209,10 @@ namespace Oxide.Plugins
                             deleted++;
                         }
                     }
-                    else
+                    else if (box2.transform.position.x - posX >= 0.25f)
                         break;
+                    else
+                        next++;
                 }
             }
 
@@ -4874,7 +5269,7 @@ namespace Oxide.Plugins
             if (asBP && itemDef.Blueprint is not null && itemDef.Blueprint.isResearchable)
             {
                 item = ItemManager.Create(BlueprintBaseDef);
-                item.blueprintTarget = itemDef.itemid;
+                if (item is not null) item.blueprintTarget = itemDef.itemid;
             } else
             {
                 item = ItemManager.Create(itemDef);
@@ -4997,7 +5392,7 @@ namespace Oxide.Plugins
                 if (asBP && itemDef.Blueprint is not null && itemDef.Blueprint.isResearchable)
                 {
                     item = ItemManager.Create(BlueprintBaseDef);
-                    item.blueprintTarget = itemDef.itemid;
+                    if (item is not null) item.blueprintTarget = itemDef.itemid;
                 }
                 else
                 {
@@ -5005,8 +5400,10 @@ namespace Oxide.Plugins
                 }
 
                 // Shouldn't happen
-                if (item.info is null)
+                if (item is null || item.info is null)
                 {
+                    item?.Remove();
+                    item = null;
                     if (--maxRetry <= 0)
                         break;
 
@@ -5151,94 +5548,53 @@ namespace Oxide.Plugins
                         }
                         #endregion
                         
+                        // Validate and serialize every supplied model before modifying disk or active state.
                         #region File Updates
-                        bool restoreFailsafe = false;
-                        
-                        #region LootTable.json Update
+                        var previousTables = lootTables;
+                        var previousGroups = lootGroups;
+                        var previousGather = oreSpawnData;
+                        var previousConfig = JsonConvert.SerializeObject(_config);
                         try
                         {
-                            DataSystem.BakDataFile("LootTables");
-                            
-                            if (lootTables != null) 
-                                lootTables.LootTables = tableData.LootTables;
-                            else
-                                lootTables = new () { LootTables = tableData.LootTables };
-                            
-                            restoreFailsafe = true; // Failsafe flag. Restore on error / fail
-                            DataSystem.SaveLootTables();
-
-                            Respond("Loaded new LootTable successfully!");
-                            restoreFailsafe = false;
-
-                            SyncWatchedPrefabsFromLootTables(enableIfTableEnabled: true);
-                            EnsureNaturalBeehiveWatched();
+                            if (tableData.LootTables is null || tableData.LootTables.Any(x => x.Value is null))
+                                throw new InvalidDataException("Missing or null loot table entries.");
+                            if (tableData.LootGroups?.Values.Any(HasInvalidLootProfile) == true)
+                                throw new InvalidDataException("Invalid loot group entries.");
+                            var nextTables = new LootTableData { LootTables = tableData.LootTables };
+                            var nextGroups = tableData.LootGroups is null ? previousGroups : new LootGroupsData { LootGroups = tableData.LootGroups };
+                            var nextGather = tableData.OreSpawn is null ? previousGather : new OreSpawnData { OreSpawn = tableData.OreSpawn };
+                            // Serialization itself can fail; do it before entering the transaction.
+                            JsonConvert.SerializeObject(nextTables);
+                            JsonConvert.SerializeObject(nextGroups);
+                            JsonConvert.SerializeObject(nextGather);
+                            DataSystem.RunFileTransaction(new[] { "LootTables", "LootGroups", "GatherRates" }, () =>
+                            {
+                                lootTables = nextTables;
+                                lootGroups = nextGroups;
+                                oreSpawnData = nextGather;
+                                LootGroupsData.ValidateGroups(lootGroups);
+                                DataSystem.SaveLootTables();
+                                DataSystem.SaveLootGroups();
+                                DataSystem.SaveOreSpawn();
+                                SyncWatchedPrefabsFromLootTables(enableIfTableEnabled: true);
+                                EnsureNaturalBeehiveWatched();
+                                InitLootSystem(true);
+                                RestartOreSpawnSystem();
+                            });
                         }
                         catch (Exception ex)
                         {
-                            Respond("Failed to load new LootTables.json data...");
-
-                            if (restoreFailsafe)
-                                DataSystem.BakDataFile("LootTables", true);
-
-                            Log($"Failed to load new LootTables data, please contact developer. Message: \n{ex}");
-                        }
-                        #endregion
-
-                        #region LootGroups.json Update
-                        try {
-                            
-                            if (tableData.LootGroups != null)
-                            {
-                                DataSystem.BakDataFile("LootGroups");
-                                
-                                if (lootGroups != null)
-                                {
-                                    lootGroups.LootGroups = tableData.LootGroups;
-                                }
-                                else
-                                {
-                                    // Data non-existent, create new data and save.
-                                    lootGroups = new() { LootGroups = tableData.LootGroups };
-                                    LootGroupsData.TryCreateExampleGroup();
-                                }
-                                
-                                restoreFailsafe = true;
-                                DataSystem.SaveLootGroups();
-
-                                Respond("Loaded new LootGroups.json successfully");
-                                restoreFailsafe = false;
-                            }
-                        } catch (Exception ex)
-                        {
-                            Respond("LootGroups.json load failed.");
-                            Log($"Failed to load new LootGroups data, please contact developer. Message: \n{ex}");
-                            
-                            if (restoreFailsafe)
-                                DataSystem.BakDataFile("LootGroups", true);
-                            
+                            lootTables = previousTables;
+                            lootGroups = previousGroups;
+                            oreSpawnData = previousGather;
+                            _config = JsonConvert.DeserializeObject<PluginConfig>(previousConfig);
+                            SaveConfig();
+                            try { InitLootSystem(true); RestartOreSpawnSystem(); }
+                            catch (Exception recovery) { Log($"Previous configuration restored, runtime recovery failed: {recovery}"); }
+                            Log($"Editor import aborted; previous configuration retained: {ex}");
                             yield break;
                         }
-                        
-                        InitLootSystem(true);
-
-                        #region Ore Spawn Update
-                        try
-                        {
-                            if (tableData.OreSpawn != null)
-                            {
-                                DataSystem.BakDataFile("GatherRates");
-                                oreSpawnData = new OreSpawnData { OreSpawn = tableData.OreSpawn };
-                                DataSystem.SaveOreSpawn();
-                                RestartOreSpawnSystem();
-                                Respond("Loaded new GatherRates.json successfully");
-                            }
-                        }
-                        catch (Exception ex)
-                        {
-                            Respond("GatherRates.json load failed.");
-                            Log($"Failed to load Ore Spawn data: {ex.Message}");
-                        }
-                        #endregion
+                        Respond("Loaded editor configuration successfully.");
                         #endregion
                     }
                 }
@@ -5267,7 +5623,7 @@ namespace Oxide.Plugins
                 return;
             }
 
-            DataSystem.BakDataFile("LootTables", restore, player);
+            DataSystem.BackupOrRestoreAll(restore, player);
         }
 
         [ConsoleCommand("bl-backup")]
@@ -5283,7 +5639,7 @@ namespace Oxide.Plugins
             if (!arg.IsRcon)
                 return;
 
-            DataSystem.BakDataFile("LootTables", restore);
+            DataSystem.BackupOrRestoreAll(restore);
         }
         #endregion
 
@@ -5518,9 +5874,6 @@ namespace Oxide.Plugins
             public float VanillaStartTotal;
             public readonly Dictionary<string, float> VanillaStartByItem = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             public readonly Dictionary<string, int> GivenByItem = new Dictionary<string, int>(StringComparer.OrdinalIgnoreCase);
-            public readonly HashSet<string> ExtraGrantedThisFrame = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
-            public int LastFrame = -1;
-            public string LastTool = "rock";
         }
 
         private enum OreType : byte
@@ -5897,6 +6250,15 @@ namespace Oxide.Plugins
             if (dispenser == null)
                 return new List<OreGatherOutput>();
 
+            return CaptureGatherOutputsFromDispenser(dispenser);
+        }
+
+        private List<OreGatherOutput> CaptureGatherOutputsFromDispenser(ResourceDispenser dispenser)
+        {
+            var containedTotals = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            var bonusTotals = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
+            AddDispenserItemAmounts(containedTotals, dispenser.containedItems);
+            AddDispenserItemAmounts(bonusTotals, dispenser.finishBonus);
             var totals = new Dictionary<string, float>(StringComparer.OrdinalIgnoreCase);
             AddDispenserItemAmounts(totals, dispenser.containedItems);
             AddDispenserItemAmounts(totals, dispenser.finishBonus);
@@ -5905,6 +6267,7 @@ namespace Oxide.Plugins
 
             var tools = GetGatherTools(dispenser.gatherType);
             float maxHealth = GetDispenserMaxHealth(dispenser);
+            float startingItemCount = containedTotals.Values.Sum();
             var outputs = new List<OreGatherOutput>(totals.Count);
 
             foreach (var item in totals)
@@ -5913,7 +6276,13 @@ namespace Oxide.Plugins
                 foreach (string tool in tools)
                 {
                     GetToolGatherStats(tool, dispenser.gatherType, maxHealth, out float gatherDamage, out float destroyFraction);
-                    amounts[tool] = SimulateDispenserYield(item.Value, gatherDamage, destroyFraction, maxHealth);
+                    containedTotals.TryGetValue(item.Key, out var contained);
+                    bonusTotals.TryGetValue(item.Key, out var bonus);
+                    int gathered = SimulateDispenserYield(contained, gatherDamage, destroyFraction, maxHealth, startingItemCount);
+                    int finish = startingItemCount > 0f && destroyFraction < dispenser.maxDestroyFractionForFinishBonus
+                        ? Mathf.CeilToInt((int)bonus * (dispenser.forceFullFinishBonus ? 1f : Mathf.Clamp01(1f - destroyFraction)))
+                        : 0;
+                    amounts[tool] = gathered + finish;
                 }
 
                 outputs.Add(new OreGatherOutput
@@ -5954,16 +6323,75 @@ namespace Oxide.Plugins
             _ => MineGatherTools
         };
 
+        private static HashSet<string> _manifestPrefabPaths;
+
         private static T FindPrefabComponent<T>(string prefabPath) where T : Component
         {
-            if (string.IsNullOrEmpty(prefabPath))
-                return null;
-
-            var go = GameManager.server.FindPrefab(prefabPath);
+            var go = FindLoadedPrefab(prefabPath);
             if (go == null)
                 return null;
 
             return go.GetComponent<T>() ?? go.GetComponentInChildren<T>(true);
+        }
+
+        // Avoid invalid/missing manifest paths and resolve moved prefabs only
+        // when the filename identifies a unique manifest entry.
+        private static GameObject FindLoadedPrefab(string prefabPath)
+        {
+            if (string.IsNullOrEmpty(prefabPath)
+                || !prefabPath.StartsWith("assets/", StringComparison.OrdinalIgnoreCase)
+                || !prefabPath.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase))
+                return null;
+
+            prefabPath = ResolveManifestPrefab(prefabPath);
+            if (prefabPath == null)
+                return null;
+
+            return GameManager.server.FindPrefab(prefabPath);
+        }
+
+        private static string ResolveManifestPrefab(string prefabPath)
+        {
+            var known = ManifestPrefabPaths();
+            if (known == null)
+                return prefabPath;
+            if (known.Contains(prefabPath))
+                return prefabPath;
+
+            int slash = prefabPath.LastIndexOf('/');
+            string file = slash >= 0 ? prefabPath.Substring(slash + 1) : prefabPath;
+            string match = null;
+            foreach (string name in known)
+            {
+                if (name.Length < file.Length || !name.EndsWith(file, StringComparison.OrdinalIgnoreCase))
+                    continue;
+                if (name.Length != file.Length && name[name.Length - file.Length - 1] != '/')
+                    continue;
+                if (match != null)
+                    return null;
+                match = name;
+            }
+
+            return match;
+        }
+
+        private static HashSet<string> ManifestPrefabPaths()
+        {
+            if (_manifestPrefabPaths != null)
+                return _manifestPrefabPaths;
+
+            var props = GameManifest.Current?.prefabProperties;
+            if (props == null)
+                return null;
+
+            _manifestPrefabPaths = new HashSet<string>(props.Length, StringComparer.OrdinalIgnoreCase);
+            foreach (var prop in props)
+            {
+                if (!string.IsNullOrEmpty(prop?.name))
+                    _manifestPrefabPaths.Add(prop.name);
+            }
+
+            return _manifestPrefabPaths;
         }
 
         private static float GetDispenserMaxHealth(ResourceDispenser dispenser)
@@ -6008,25 +6436,41 @@ namespace Oxide.Plugins
             return held?.GetComponent<BaseMelee>() ?? held?.GetComponentInChildren<BaseMelee>(true);
         }
 
-        private static int SimulateDispenserYield(float startAmount, float gatherDamage, float destroyFraction, float maxHealth)
+        private static int SimulateDispenserYield(float startAmount, float gatherDamage, float destroyFraction, float maxHealth, float startingItemCount = 0f)
         {
             if (startAmount <= 0f)
                 return 0;
             if (maxHealth <= 0f || gatherDamage <= 0f)
                 return Mathf.Max(0, Mathf.RoundToInt(startAmount));
 
+            startingItemCount = Mathf.Max(startAmount, startingItemCount);
             float remaining = startAmount;
             float health = maxHealth;
             float given = 0f;
-            int hits = 0;
-            while (health > 0.001f && remaining > 0.001f && hits++ < 256)
+            // Native gathering uses the initial pool, removes destroyed resources too,
+            // and reduces health according to depletion rather than the tool's damage.
+            while (health > 0.001f && remaining > 0.001f)
             {
-                float fraction = Mathf.Min(1f, gatherDamage / maxHealth);
-                float give = remaining * fraction;
-                float destroy = remaining * destroyFraction * fraction;
-                given += give;
-                remaining = Mathf.Max(0f, remaining - give - destroy);
-                health -= gatherDamage;
+                float give = Mathf.Round(Mathf.Clamp(startingItemCount * Mathf.Min(gatherDamage, health) / maxHealth, 0f, remaining));
+                float destroy = give * destroyFraction * 2f;
+                if (remaining <= give + destroy)
+                {
+                    float scale = (give + destroy) / remaining;
+                    give /= scale;
+                    destroy /= scale;
+                }
+
+                float consumed = Mathf.Floor(give) + Mathf.Floor(destroy);
+                if (give < 1f)
+                {
+                    // Rust randomly grants the final fractional resource; use its expected yield.
+                    given += Mathf.Max(0f, give);
+                    break;
+                }
+                if (consumed <= 0f) break;
+                given += Mathf.Floor(give);
+                remaining = Mathf.Max(0f, remaining - consumed);
+                health = Mathf.Max(0f, health - consumed / startingItemCount * maxHealth);
             }
 
             return Mathf.Max(0, Mathf.RoundToInt(given));
@@ -6058,6 +6502,14 @@ namespace Oxide.Plugins
                 }
             };
 
+        private static readonly Dictionary<string, string> ExcavatorModeResources = new Dictionary<string, string>(StringComparer.OrdinalIgnoreCase)
+        {
+            ["Sulfur"] = "sulfur.ore",
+            ["Metal Fragments"] = "metal.fragments",
+            ["HQM Ore"] = "hq.metal.ore",
+            ["Stone"] = "stones"
+        };
+
         private bool EnsureQuarryHarvestDefaults()
         {
             bool changed = false;
@@ -6067,7 +6519,9 @@ namespace Oxide.Plugins
 
             foreach (var pair in VanillaQuarryPerDiesel)
             {
-                if (Ore.QuarryHarvest.TryGetValue(pair.Key, out var existing) && existing?.Outputs is { Count: > 0 })
+                if (pair.Key == QUARRY_EXCAVATOR_KEY) continue;
+                // An existing empty list is intentional suppression for quarries.
+                if (Ore.QuarryHarvest.TryGetValue(pair.Key, out var existing) && existing != null)
                     continue;
 
                 var outputs = new List<QuarryHarvestOutput>(pair.Value.Count);
@@ -6082,6 +6536,67 @@ namespace Oxide.Plugins
                 changed = true;
             }
 
+            if (!Ore.QuarryHarvest.TryGetValue(QUARRY_EXCAVATOR_KEY, out var excavator) || excavator == null)
+            {
+                excavator = new QuarryHarvestSettings();
+                Ore.QuarryHarvest[QUARRY_EXCAVATOR_KEY] = excavator;
+                changed = true;
+            }
+            bool migrate = excavator.MiningModes == null;
+            excavator.MiningModes = migrate
+                ? new Dictionary<string, QuarryHarvestSettings>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, QuarryHarvestSettings>(excavator.MiningModes, StringComparer.OrdinalIgnoreCase);
+            foreach (var mode in ExcavatorModeResources)
+            {
+                // Preserve explicit empty lists and disabled mode sections.
+                if (excavator.MiningModes.TryGetValue(mode.Key, out var existing) && existing != null) continue;
+                var legacy = migrate ? excavator.Outputs?.FirstOrDefault(output => output != null
+                    && string.Equals(output.Shortname, mode.Value, StringComparison.OrdinalIgnoreCase)) : null;
+                excavator.MiningModes[mode.Key] = new QuarryHarvestSettings
+                {
+                    OverrideGatherAmounts = migrate && excavator.OverrideGatherAmounts,
+                    Outputs = new List<QuarryHarvestOutput>
+                    {
+                        new QuarryHarvestOutput { Shortname = mode.Value,
+                            Amount = legacy?.Amount ?? VanillaQuarryPerDiesel[QUARRY_EXCAVATOR_KEY][mode.Value] }
+                    }
+                };
+                changed = true;
+            }
+
+            return changed;
+        }
+
+        private static LivestockProductionSettings CreateDefaultLivestockProduction()
+        {
+            var settings = new LivestockProductionSettings { OverrideProduction = false };
+            settings.EnsureGeneTiers();
+            return settings;
+        }
+
+        private bool EnsureLivestockProductionDefaults()
+        {
+            bool changed = false;
+            Ore.LivestockProduction = Ore.LivestockProduction == null
+                ? new Dictionary<string, LivestockProductionSettings>(StringComparer.OrdinalIgnoreCase)
+                : new Dictionary<string, LivestockProductionSettings>(Ore.LivestockProduction, StringComparer.OrdinalIgnoreCase);
+
+            foreach (var key in new[] { LIVESTOCK_COW_PREFAB, LIVESTOCK_BULL_PREFAB, LIVESTOCK_SHEEP_PREFAB })
+            {
+                if (Ore.LivestockProduction.TryGetValue(key, out var existing) && existing != null)
+                {
+                    if (existing.Bad == null || existing.Ok == null || existing.Good == null)
+                    {
+                        existing.EnsureGeneTiers();
+                        changed = true;
+                    }
+                    continue;
+                }
+
+                Ore.LivestockProduction[key] = CreateDefaultLivestockProduction();
+                changed = true;
+            }
+
             return changed;
         }
 
@@ -6093,23 +6608,24 @@ namespace Oxide.Plugins
 
             try
             {
+                bool prefabsRepaired = RepairMissingOrePrefabs();
                 bool vanillaChanged = PopulateVanillaGatherDefaults(_gatherRatesNeedsVanillaFill);
                 bool quarryChanged = EnsureQuarryHarvestDefaults();
-                if (vanillaChanged || quarryChanged)
+                bool livestockChanged = EnsureLivestockProductionDefaults();
+                if (vanillaChanged || quarryChanged || livestockChanged || prefabsRepaired)
                 {
                     DataSystem.SaveOreSpawn();
-                    if (vanillaChanged)
-                        Log("Loaded vanilla gather, pickup, and harvest amounts from in-game prefabs into GatherRates.json");
-                    if (quarryChanged)
-                        Log("Added quarry and excavator diesel amounts to GatherRates.json");
+                    Log("Loaded all defaults for GatherRates.json");
                 }
             }
             catch (Exception ex)
             {
                 Log($"Could not load vanilla gather defaults from in-game prefabs: {ex.Message}");
             }
+
             _gatherRatesNeedsVanillaFill = false;
             NotifyGatherStandDownIfNeeded();
+            RefreshLivestockProductionTimers();
             _npcHarvestHitCache.Clear();
             _npcHarvestMissCache.Clear();
             _oreTypeCache.Clear();
@@ -6128,7 +6644,7 @@ namespace Oxide.Plugins
 
             if (!IsOreSystemEnabled())
             {
-                Puts("Ore spawning is disabled. Turn on Custom spawning for a node or collectable in the Looty Editor in the Gather → Ore tab.");
+                Puts("Ore spawning is disabled. Turn on Custom spawning for a node or collectable in the Looty Editor in the Gather -> Ore tab.");
                 UpdateOreHookSubscriptions();
                 return;
             }
@@ -6169,6 +6685,9 @@ namespace Oxide.Plugins
             cachedPlayerCount = BasePlayer.activePlayerList.Count;
             UpdatePopulationScalar();
             _oreSystemStarted = true;
+            _nativeSuppressedTypes.Clear();
+            _failedSpawnPrefabs.Clear();
+            SpawnHandler_SpawnRepeating_Patch.ResetTracking();
 
             if (_oreStoredData.Ores.Count > 0)
             {
@@ -6177,14 +6696,15 @@ namespace Oxide.Plugins
             }
             else
             {
-                if (Ore.DisableNativeSpawning)
-                    CleanupNativeOres();
                 StartSpawning();
             }
         }
 
         private void RestartOreSpawnSystem()
         {
+            if (RepairMissingOrePrefabs()) DataSystem.SaveOreSpawn();
+            EnsureLivestockProductionDefaults();
+            RefreshLivestockProductionTimers();
             _npcHarvestHitCache.Clear();
             _npcHarvestMissCache.Clear();
             SpawnHandler_SpawnRepeating_Patch.ResetTracking();
@@ -6199,6 +6719,7 @@ namespace Oxide.Plugins
             else
             {
                 UnsubscribeOreHooks();
+                _nativeSuppressedTypes.Clear();
                 if (_oreSystemStarted)
                     CleanupSpawnedOres();
                 _oreSystemStarted = false;
@@ -6210,6 +6731,7 @@ namespace Oxide.Plugins
         private void ShutdownOreSpawnSystem()
         {
             StopSpawning();
+            _nativeSuppressedTypes.Clear();
             StopAllShowCoroutines();
             if (cleanupCoroutine != null)
             {
@@ -6318,13 +6840,15 @@ namespace Oxide.Plugins
             if (HasAnyCollectableEnabled() || HasAnyCollectableBonusLoot() || HasAnyCollectablePickupOverride())
             {
                 Subscribe(nameof(OnCollectiblePickup));
+                Subscribe(nameof(OnCollectiblePickedup));
             }
             else
             {
                 Unsubscribe(nameof(OnCollectiblePickup));
+                Unsubscribe(nameof(OnCollectiblePickedup));
             }
 
-            if (HasAnyCollectableEnabled() || HasAnyCollectableBonusLoot() || HasAnyCollectablePickupOverride() || HasAnyNpcHarvestOverride() || HasAnyNodeGatherOverride())
+            if (HasAnyResourceEnabled() || HasAnyCollectableBonusLoot() || HasAnyCollectablePickupOverride() || HasAnyNpcHarvestOverride() || HasAnyNodeGatherOverride())
             {
                 Subscribe(nameof(OnEntityKill));
             }
@@ -6333,7 +6857,7 @@ namespace Oxide.Plugins
                 Unsubscribe(nameof(OnEntityKill));
             }
 
-            if (Ore.DisableNativeSpawning && HasAnyResourceEnabled())
+            if ((Ore.DisableNativeSpawning && HasAnyResourceEnabled()) || HasAnyLivestockProductionOverride())
                 Subscribe(nameof(OnEntitySpawned));
             else
                 Unsubscribe(nameof(OnEntitySpawned));
@@ -6346,6 +6870,7 @@ namespace Oxide.Plugins
             Unsubscribe(nameof(OnQuarryGather));
             Unsubscribe(nameof(OnExcavatorGather));
             Unsubscribe(nameof(OnCollectiblePickup));
+            Unsubscribe(nameof(OnCollectiblePickedup));
             Unsubscribe(nameof(OnEntityKill));
             Unsubscribe(nameof(OnEntitySpawned));
         }
@@ -6443,7 +6968,13 @@ namespace Oxide.Plugins
             if (Ore.QuarryHarvest == null || Ore.QuarryHarvest.Count == 0) return false;
             foreach (var harvest in Ore.QuarryHarvest.Values)
             {
-                if (harvest != null && harvest.OverrideGatherAmounts && harvest.Outputs is { Count: > 0 })
+                if (harvest == null) continue;
+                if (harvest.MiningModes != null)
+                {
+                    if (harvest.MiningModes.Values.Any(mode => mode != null && mode.OverrideGatherAmounts && mode.Outputs != null))
+                        return true;
+                }
+                else if (harvest.OverrideGatherAmounts && harvest.Outputs != null)
                     return true;
             }
             return false;
@@ -6529,8 +7060,6 @@ namespace Oxide.Plugins
 
             SchedulePopulationCheck();
         }
-
-        #endregion
 
         #region Population Scaling
         private void SchedulePopulationCheck()
@@ -6720,8 +7249,9 @@ namespace Oxide.Plugins
                 }
                 else
                 {
-                    var entity = GameManager.server.CreateEntity(saved.Prefab, position);
-                    if (entity is null && oreType == OreType.HQM)
+                    var prefab = ResolveOrePrefab(oreType, saved.Prefab);
+                    var entity = GameManager.server.CreateEntity(prefab, position);
+                    if (entity is null && oreType == OreType.HQM && !string.Equals(prefab, METAL_ORE_PREFAB, StringComparison.OrdinalIgnoreCase))
                         entity = GameManager.server.CreateEntity(METAL_ORE_PREFAB, position);
                     if (entity is null)
                     {
@@ -6744,14 +7274,30 @@ namespace Oxide.Plugins
 
             _oreStoredData.Ores.Clear();
 
-            if (Ore.DisableNativeSpawning)
-                CleanupNativeOres();
+            var restoredTypes = new HashSet<OreType>();
+            foreach (var node in spawnedOres.Values)
+            {
+                if (IsResourceCustomEnabled(node.Type))
+                    restoredTypes.Add(node.Type);
+            }
+            foreach (var oreType in restoredTypes)
+            {
+                _nativeSuppressedTypes.Add(oreType);
+                if (Ore.DisableNativeSpawning)
+                    CleanupNativeOres(oreType);
+            }
+            SpawnHandler_SpawnRepeating_Patch.ResetTracking();
 
             if (Ore.Debug)
                 Puts($"Restored {restored} ores from data ({failed} failed). Tracked: {spawnedOres.Count}");
 
+            var fill = SpawnEnabledTypes();
+            while (fill.MoveNext())
+                yield return fill.Current;
+
             yield return CoroutineEx.waitForSeconds(2f);
             RemoveFloatingOres();
+            FinishOreSpawnJob();
         }
         #endregion
 
@@ -6854,13 +7400,27 @@ namespace Oxide.Plugins
             spawnCoroutine = null;
         }
 
+        private void FinishOreSpawnJob()
+        {
+            spawnCoroutine = null;
+            SaveOreData();
+        }
+
         private const int GENERATE_YIELD_EVERY = 200;
 
         private IEnumerator GeneratePositionsForOre(OreTypeSettings settings, OreType oreType)
         {
-            if (Ore.GlobalSpawnMultiplier <= 0.01f) yield break;
+            if (float.IsNaN(Ore.GlobalSpawnMultiplier) || float.IsInfinity(Ore.GlobalSpawnMultiplier) || Ore.GlobalSpawnMultiplier <= 0.01f) yield break;
             var densityMult = Mathf.Sqrt(Mathf.Max(0.05f, Ore.GlobalSpawnMultiplier));
             var scaledGridSize = settings.GridSize * currentGridScalar / densityMult;
+            if (float.IsNaN(scaledGridSize) || float.IsInfinity(scaledGridSize) || scaledGridSize <= 0 ||
+                float.IsNaN(halfMapSize) || float.IsInfinity(halfMapSize) || halfMapSize <= 0)
+            {
+                PrintWarning($"Invalid spawn grid for {settings.Prefab}; skipping generation.");
+                yield break;
+            }
+            // Bound each resource type to approximately 250,000 candidate cells, even with extreme density settings.
+            scaledGridSize = Mathf.Max(scaledGridSize, halfMapSize * 2f / 500f);
             var maxOffset = scaledGridSize * 0.4f;
 
             var evaluated = 0;
@@ -6968,57 +7528,142 @@ namespace Oxide.Plugins
         {
             yield return null;
 
-            spawnQueue.Clear();
-            foreach (var pair in EnumerateResourceTypes())
-            {
-                if (pair.Settings is { Enabled: true })
-                    yield return GeneratePositionsForOre(pair.Settings, pair.Type);
-            }
-
-            if (Ore.Debug)
-                Puts($"Generated {spawnQueue.Count} potential spawn positions (Grid scalar: {currentGridScalar:F2})");
-
-            var batchCount = 0;
-            var wait = CoroutineEx.waitForSeconds(Ore.SpawnDelay);
-
-            while (spawnQueue.Count > 0)
-            {
-                SpawnOre(spawnQueue.Dequeue());
-                batchCount++;
-
-                if (batchCount < Ore.BatchSize) continue;
-                yield return wait;
-                batchCount = 0;
-            }
-
-            if (Ore.Debug)
-                Puts($"Spawning completed. Total ores: {spawnedOres.Count}");
+            var fill = SpawnEnabledTypes();
+            while (fill.MoveNext())
+                yield return fill.Current;
 
             yield return CoroutineEx.waitForSeconds(1f);
             RemoveFloatingOres();
+            FinishOreSpawnJob();
         }
 
-        private void SpawnOre(OreSpawnPosition spawnData)
+        private IEnumerator SpawnEnabledTypes()
         {
-            var prefab = spawnData.Prefab;
+            var placed = 0;
+            var failed = 0;
+            var skipped = new List<string>();
+
+            foreach (var pair in EnumerateResourceTypes())
+            {
+                if (pair.Settings is not { Enabled: true })
+                    continue;
+                if (_nativeSuppressedTypes.Contains(pair.Type))
+                    continue;
+
+                spawnQueue.Clear();
+                var generate = GeneratePositionsForOre(pair.Settings, pair.Type);
+                while (generate.MoveNext())
+                    yield return generate.Current;
+
+                var queued = spawnQueue.Count;
+                if (queued == 0)
+                {
+                    skipped.Add(pair.Type.ToString());
+                    continue;
+                }
+
+                var spawnedThisType = 0;
+                var batchCount = 0;
+                var batchSize = Mathf.Max(1, Ore.BatchSize);
+                var wait = CoroutineEx.waitForSeconds(Mathf.Max(0.01f, Ore.SpawnDelay));
+                while (spawnQueue.Count > 0)
+                {
+                    if (SpawnOre(spawnQueue.Dequeue()))
+                    {
+                        placed++;
+                        spawnedThisType++;
+                    }
+                    else
+                    {
+                        failed++;
+                    }
+
+                    if (++batchCount < batchSize)
+                        continue;
+                    yield return wait;
+                    batchCount = 0;
+                }
+
+                if (spawnedThisType > 0 && Ore.DisableNativeSpawning)
+                {
+                    _nativeSuppressedTypes.Add(pair.Type);
+                    SpawnHandler_SpawnRepeating_Patch.ResetTracking();
+                    CleanupNativeOres(pair.Type);
+                }
+                else if (spawnedThisType == 0)
+                {
+                    skipped.Add(pair.Type.ToString());
+                }
+            }
+
+            Puts($"Custom spawning placed {placed} resources{(failed > 0 ? $" ({failed} failed)" : "")}.");
+            if (skipped.Count > 0)
+                Puts($"Custom spawning left vanilla nodes in place for: {string.Join(", ", skipped)}.");
+        }
+
+        private static string ResolveOrePrefab(OreType type, string prefab)
+        {
+            if (type == OreType.HQM && (string.IsNullOrEmpty(prefab)
+                || string.Equals(prefab, "assets/bundled/prefabs/autospawn/resource/ores/hqm-ore.prefab", StringComparison.OrdinalIgnoreCase)))
+                return HQM_ORE_PREFAB;
+            if (type == OreType.CollectCoconut && (string.IsNullOrEmpty(prefab)
+                || string.Equals(prefab, "assets/bundled/prefabs/autospawn/collectable/coconut/coconut-collectable.prefab", StringComparison.OrdinalIgnoreCase)))
+                return COCONUT_COLLECTABLE_PREFAB;
+            return prefab;
+        }
+
+        private bool RepairMissingOrePrefabs()
+        {
+            var changed = false;
+            foreach (var pair in EnumerateResourceTypes())
+            {
+                if (pair.Settings == null)
+                    continue;
+                var resolved = ResolveOrePrefab(pair.Type, pair.Settings.Prefab);
+                if (string.Equals(resolved, pair.Settings.Prefab, StringComparison.Ordinal))
+                    continue;
+                pair.Settings.Prefab = resolved;
+                changed = true;
+            }
+            return changed;
+        }
+
+        private bool SpawnOre(OreSpawnPosition spawnData)
+        {
+            var prefab = ResolveOrePrefab(spawnData.Type, spawnData.Prefab);
             if (spawnData.Type == OreType.CollectMushroom)
                 prefab = UnityEngine.Random.Range(0, 2) == 0 ? MUSHROOM_CLUSTER_5_PREFAB : MUSHROOM_CLUSTER_6_PREFAB;
 
-            var entity = GameManager.server.CreateEntity(prefab, spawnData.Position);
-            if (entity is null && spawnData.Type == OreType.HQM)
-                entity = GameManager.server.CreateEntity(METAL_ORE_PREFAB, spawnData.Position);
-            if (entity is null) return;
-
-            entity.Spawn();
+            var rotation = Quaternion.Euler(0f, UnityEngine.Random.Range(0f, 360f), 0f);
+            var entity = GameManager.server.CreateEntity(prefab, spawnData.Position, rotation);
+            if (entity is null && spawnData.Type == OreType.HQM && !string.Equals(prefab, METAL_ORE_PREFAB, StringComparison.OrdinalIgnoreCase))
+                entity = GameManager.server.CreateEntity(METAL_ORE_PREFAB, spawnData.Position, rotation);
+            if (entity is null)
+            {
+                if (_failedSpawnPrefabs.Add(prefab ?? string.Empty))
+                    PrintWarning($"Custom spawning could not create '{prefab}' for {spawnData.Type}.");
+                return false;
+            }
 
             var gatherMultiplier = 1f;
             if (IsNodeType(spawnData.Type) && Ore.RichVein.Enabled && UnityEngine.Random.Range(0f, 1f) < Ore.RichVein.Chance)
                 gatherMultiplier = Ore.RichVein.Multiplier;
 
             TrackResourceEntity(entity, spawnData.Type, gatherMultiplier, prefab, spawnData.Biome);
+            entity.Spawn();
+            if (entity.IsDestroyed || !spawnedOres.ContainsKey(entity))
+            {
+                if (spawnedOres.TryGetValue(entity, out var lost))
+                {
+                    DecrementOreCount(lost.Type, lost.GatherMultiplier);
+                    spawnedOres.Remove(entity);
+                }
+                return false;
+            }
 
             if (Ore.Debug && gatherMultiplier > 1f)
                 Puts($"Spawned RICH {spawnData.Type} vein at {spawnData.Position:F1} (x{gatherMultiplier})");
+            return true;
         }
 
         private void TrackResourceEntity(BaseEntity entity, OreType type, float gatherMultiplier, string prefab = null, TerrainBiome.Enum? biome = null)
@@ -7215,6 +7860,527 @@ namespace Oxide.Plugins
         }
         #endregion
 
+        public enum LivestockGeneTier { Bad, Ok, Good }
+
+        private sealed class LivestockCorpseSource
+        {
+            public string Key;
+        }
+
+        private struct LivestockCooldownState
+        {
+            public bool Applied;
+            public float Original;
+        }
+
+        private struct DungCreateFrame
+        {
+            public ItemDefinition Definition;
+            public int Amount;
+        }
+
+        private sealed class LivestockTimerRates
+        {
+            public float Milk = 1f, Wool = 1f, Dung = 1f;
+        }
+
+        private readonly ConditionalWeakTable<LivestockAnimal, LivestockTimerRates> _livestockTimerRates = new ConditionalWeakTable<LivestockAnimal, LivestockTimerRates>();
+        private static readonly System.Reflection.FieldInfo CowMilkTimerField = AccessTools.Field(typeof(Cow), "milkTimer");
+        private static readonly System.Reflection.FieldInfo SheepWoolTimerField = AccessTools.Field(typeof(Sheep), "shearTimer");
+        private static readonly System.Reflection.FieldInfo AnimalDungTimerField = AccessTools.Field(typeof(LivestockAnimal), "dungTimer");
+
+        // Timers retain the fraction of their current cycle when a setting changes.
+        // Store only the multiplier: native dung condition and random variance remain intact.
+        private static float LivestockTimerMultiplier(float configured, float vanilla)
+        {
+            if (float.IsNaN(configured) || float.IsInfinity(configured) || configured < 0f || vanilla <= 0f || float.IsNaN(vanilla) || float.IsInfinity(vanilla))
+                return 1f;
+            var ratio = (double)configured / vanilla;
+            return (float)Math.Min(float.MaxValue, ratio);
+        }
+
+        private static float RescaleLivestockRemaining(float remaining, float oldRate, float newRate)
+        {
+            if (oldRate <= 0f || float.IsNaN(remaining) || float.IsInfinity(remaining)) return 0f;
+            return (float)Math.Min(float.MaxValue, Math.Max(0d, (double)remaining * newRate / oldRate));
+        }
+
+        private bool HasAnyLivestockProductionOverride()
+            => Ore?.LivestockProduction?.Values.Any(s => s?.OverrideProduction == true) == true;
+
+        private void RefreshLivestockProductionTimers(bool restoreVanilla = false)
+        {
+            foreach (var entity in BaseNetworkable.serverEntities)
+                if (entity is LivestockAnimal animal)
+                    RefreshLivestockProductionTimers(animal, restoreVanilla);
+        }
+
+        private void RefreshLivestockProductionTimers(LivestockAnimal animal, bool restoreVanilla = false)
+        {
+            if (animal == null || animal.IsDestroyed || !animal.isServer) return;
+            var rates = _livestockTimerRates.GetOrCreateValue(animal);
+            bool yieldOverride = !restoreVanilla && TryGetLivestockProduction(animal, LivestockGene.Yield, out _);
+            LivestockGeneProduction yield = null;
+            if (yieldOverride) TryGetLivestockProduction(animal, LivestockGene.Yield, out yield);
+            if (animal is Cow cow)
+            {
+                float rate = yieldOverride ? LivestockTimerMultiplier(yield.MilkCooldownSeconds, cow.MilkCooldown / Math.Max(0.01f, cow.GeneScale(LivestockGene.Yield))) : 1f;
+                RefreshLivestockTimer(CowMilkTimerField?.GetValue(cow) as PersistentTimer, ref rates.Milk, rate, false);
+            }
+            if (animal is Sheep sheep)
+            {
+                float rate = yieldOverride ? LivestockTimerMultiplier(yield.WoolCooldownSeconds, sheep.ShearCooldown / Math.Max(0.01f, sheep.GeneScale(LivestockGene.Yield))) : 1f;
+                RefreshLivestockTimer(SheepWoolTimerField?.GetValue(sheep) as PersistentTimer, ref rates.Wool, rate, false);
+            }
+            float dungRate = !restoreVanilla && TryGetLivestockProduction(animal, LivestockGene.Dung, out var dung)
+                ? LivestockTimerMultiplier(dung.DungIntervalSeconds < 0f ? float.NaN : Math.Max(1f, dung.DungIntervalSeconds), animal.DungInterval / Math.Max(0.01f, animal.GeneScale(LivestockGene.Dung))) : 1f;
+            RefreshLivestockTimer(AnimalDungTimerField?.GetValue(animal) as PersistentTimer, ref rates.Dung, dungRate, true);
+        }
+
+        private static void RefreshLivestockTimer(PersistentTimer timer, ref float previous, float desired, bool automatic)
+        {
+            if (timer == null) return;
+            if (timer.IsRunning && previous != desired)
+            {
+                float remaining = RescaleLivestockRemaining(timer.Remaining, previous, desired);
+                timer.Start(automatic ? Math.Max(1f, remaining) : remaining);
+            }
+            previous = desired;
+        }
+
+        private void RememberLivestockTimerStart(LivestockAnimal animal, int id, bool applied, float original)
+        {
+            var rates = _livestockTimerRates.GetOrCreateValue(animal);
+            float rate = 1f;
+            if (applied && TryGetLivestockProduction(animal, id == 4 ? LivestockGene.Dung : LivestockGene.Yield, out var production))
+            {
+                float configured = id == 4 ? Math.Max(1f, production.DungIntervalSeconds) : id == 5 ? production.MilkCooldownSeconds : production.WoolCooldownSeconds;
+                rate = LivestockTimerMultiplier(configured, original / Math.Max(0.01f, animal.GeneScale(id == 4 ? LivestockGene.Dung : LivestockGene.Yield)));
+            }
+            if (id == 5) rates.Milk = rate;
+            else if (id == 6) rates.Wool = rate;
+            else
+            {
+                rates.Dung = rate;
+                var timer = AnimalDungTimerField?.GetValue(animal) as PersistentTimer;
+                if (applied && timer?.IsRunning == true)
+                {
+                    if (float.IsNaN(timer.Remaining)) timer.Start(1f);
+                    else if (float.IsInfinity(timer.Remaining)) timer.Start(float.MaxValue);
+                    else if (timer.Remaining < 1f) timer.Start(1f);
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), nameof(LivestockAnimal.Save))]
+        private static class LivestockProduction_Save_Patch
+        {
+            private static void Postfix(LivestockAnimal __instance, BaseNetworkable.SaveInfo info)
+            {
+                // Rust persists remaining time only, without a rate. Normalize the saved
+                // copy to vanilla so the next load applies the current rate exactly once.
+                if (!info.forDisk || _instance == null || info.msg?.livestockAnimal?.timers == null
+                    || !_instance._livestockTimerRates.TryGetValue(__instance, out var rates)) return;
+                foreach (var timer in info.msg.livestockAnimal.timers)
+                {
+                    float rate = timer.id == 4 ? rates.Dung : timer.id == 5 ? rates.Milk : timer.id == 6 ? rates.Wool : 1f;
+                    timer.remaining = RescaleLivestockRemaining(timer.remaining, rate, 1f);
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), nameof(LivestockAnimal.Load))]
+        private static class LivestockProduction_Load_Patch
+        {
+            private static void Postfix(LivestockAnimal __instance, BaseNetworkable.LoadInfo info)
+            {
+                if (!info.fromDisk || _instance == null) return;
+                _instance._livestockTimerRates.Remove(__instance);
+                _instance.NextTick(() => _instance?.RefreshLivestockProductionTimers(__instance));
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), "TransferStateTo")]
+        private static class LivestockProduction_Transfer_Patch
+        {
+            private static void Postfix(LivestockAnimal __instance, [HarmonyArgument(0)] LivestockAnimal target)
+            {
+                if (_instance == null || target == null) return;
+                var targetRates = _instance._livestockTimerRates.GetOrCreateValue(target);
+                if (_instance._livestockTimerRates.TryGetValue(__instance, out var sourceRates))
+                {
+                    // Rust copies yield timers, but restarts dung after copying genes.
+                    targetRates.Milk = sourceRates.Milk;
+                    targetRates.Wool = sourceRates.Wool;
+                }
+                else targetRates.Milk = targetRates.Wool = 1f;
+                _instance.RefreshLivestockProductionTimers(target);
+            }
+        }
+
+        private readonly ConditionalWeakTable<LivestockCorpse, LivestockCorpseSource> _livestockCorpseSources = new ConditionalWeakTable<LivestockCorpse, LivestockCorpseSource>();
+        [ThreadStatic] private static Stack<DungCreateFrame> _dungCreateFrames;
+
+        private bool TryGetLivestockProduction(LivestockAnimal animal, LivestockGene gene, out LivestockGeneProduction production)
+        {
+            production = null;
+            if (animal == null || Ore?.LivestockProduction == null
+                || (_config?.Generic?.StandDownLivestockProductionIfOtherPlugins == true && TryGetLoadedGatherConflictPlugins(out _)))
+                return false;
+
+            var key = LivestockKey(animal);
+            if (key == null || !Ore.LivestockProduction.TryGetValue(key, out var settings) || settings == null || !settings.OverrideProduction)
+                return false;
+
+            production = settings.ForTier(GeneTier(animal, gene));
+            return production != null;
+        }
+
+        private float LivestockBestOfBreed(LivestockAnimal animal, int amount, float interval, bool wool)
+        {
+            if (amount <= 0 || interval <= 0f) return 0f;
+            var good = Ore.LivestockProduction[LivestockKey(animal)].ForTier(LivestockGeneTier.Good);
+            var goodAmount = wool ? good.WoolAmount : good.MilkAmount;
+            var goodInterval = wool ? good.WoolCooldownSeconds : good.MilkCooldownSeconds;
+            return goodAmount > 0 && goodInterval > 0f
+                ? Mathf.Clamp01((amount / interval) / (goodAmount / goodInterval))
+                : 0f;
+        }
+
+        private static string LivestockKey(LivestockAnimal animal)
+        {
+            if (animal is Cow)
+                return animal.IsMale ? LIVESTOCK_BULL_PREFAB : LIVESTOCK_COW_PREFAB;
+            if (animal is Sheep)
+                return LIVESTOCK_SHEEP_PREFAB;
+            return null;
+        }
+
+        private static LivestockGeneTier GeneTier(LivestockAnimal animal, LivestockGene gene)
+        {
+            if (!ConVar.Livestock.genesEnabled)
+                return LivestockGeneTier.Ok;
+
+            switch (animal.Expressed(gene))
+            {
+                case LivestockAllele.Bad: return LivestockGeneTier.Bad;
+                case LivestockAllele.Good: return LivestockGeneTier.Good;
+                default: return LivestockGeneTier.Ok;
+            }
+        }
+
+        private static string? LivestockPrefabKey(string prefabName)
+        {
+            if (string.IsNullOrEmpty(prefabName)) return null;
+            var name = prefabName.Replace('\\', '/');
+            var slash = name.LastIndexOf('/');
+            if (slash >= 0) name = name.Substring(slash + 1);
+            while (name.EndsWith(".prefab", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith(".entity", StringComparison.OrdinalIgnoreCase)
+                || name.EndsWith(".corpse", StringComparison.OrdinalIgnoreCase))
+            {
+                var dot = name.LastIndexOf('.');
+                name = name.Substring(0, dot);
+            }
+
+            if (name.Equals("cow", StringComparison.OrdinalIgnoreCase)) return LIVESTOCK_COW_PREFAB;
+            if (name.Equals("bull", StringComparison.OrdinalIgnoreCase)) return LIVESTOCK_BULL_PREFAB;
+            if (name.Equals("sheep", StringComparison.OrdinalIgnoreCase)) return LIVESTOCK_SHEEP_PREFAB;
+            return null;
+        }
+
+        private void RememberLivestockCorpse(LivestockCorpse corpse, BaseEntity source)
+        {
+            if (corpse == null || source is not LivestockAnimal animal) return;
+            var key = LivestockKey(animal) ?? LivestockPrefabKey(source.PrefabName);
+            if (key == null) return;
+
+            _livestockCorpseSources.Remove(corpse);
+            _livestockCorpseSources.Add(corpse, new LivestockCorpseSource { Key = key });
+
+            // The prefab may not contain all yields: sheep add their remaining fleece here.
+            if (Ore.NpcHarvest.TryGetValue(key, out var existing) && existing?.GatherOutputs is { Count: > 0 })
+                return;
+
+            var outputs = CaptureGatherOutputsFromPrefab(corpse.PrefabName);
+            if (outputs.Count == 0)
+            {
+                var dispenser = corpse.GetComponent<ResourceDispenser>();
+                if (dispenser == null) return;
+                outputs = CaptureGatherOutputsFromDispenser(dispenser);
+            }
+            // Fleece depends on age and prior shearing, so it is not a species default.
+            if (animal is Sheep)
+                outputs.RemoveAll(output => string.Equals(output.Shortname, "wool", StringComparison.OrdinalIgnoreCase));
+            if (outputs.Count == 0) return;
+
+            Ore.NpcHarvest[key] = new NpcHarvestSettings
+            {
+                OverrideGatherAmounts = existing?.OverrideGatherAmounts ?? false,
+                GatherOutputs = outputs
+            };
+            _npcHarvestHitCache.Remove(key);
+            _npcHarvestMissCache.Remove(key);
+            DataSystem.SaveOreSpawn();
+            UpdateOreHookSubscriptions();
+        }
+
+        [HarmonyPatch(typeof(LivestockCorpse), nameof(LivestockCorpse.ServerInitCorpse))]
+        private static class LivestockCorpse_Init_Patch
+        {
+            private static void Postfix(LivestockCorpse __instance, [HarmonyArgument(0)] BaseEntity source)
+            {
+                try { _instance?.RememberLivestockCorpse(__instance, source); }
+                catch (Exception ex) { Log($"Could not capture livestock corpse harvest defaults: {ex.Message}"); }
+            }
+        }
+
+        [HarmonyPatch(typeof(Cow), nameof(Cow.MilkedAmount))]
+        private static class Cow_MilkedAmount_Patch
+        {
+            private static void Postfix(Cow __instance, ref int __result)
+            {
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) == true)
+                    __result = Math.Max(0, production.MilkAmount);
+            }
+        }
+
+        [HarmonyPatch(typeof(Cow), nameof(Cow.TryGetYield))]
+        private static class Cow_TryGetYield_Patch
+        {
+            private static void Postfix(Cow __instance, [HarmonyArgument(0)] ref ItemDefinition item,
+                [HarmonyArgument(1)] ref int amount, [HarmonyArgument(2)] ref float interval,
+                [HarmonyArgument(3)] ref float bestOfBreed, ref bool __result)
+            {
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) == true)
+                {
+                    amount = Math.Max(0, production.MilkAmount);
+                    interval = Math.Max(0f, production.MilkCooldownSeconds);
+                    bestOfBreed = _instance.LivestockBestOfBreed(__instance, amount, interval, wool: false);
+                    __result = item != null && amount > 0 && interval > 0f;
+                }
+            }
+        }
+
+        private bool TryGetLivestockWoolAmount(Sheep sheep, ItemAmount item, out int amount)
+        {
+            amount = 0;
+            if (item?.itemDef == null || item.amount <= 0f
+                || !string.Equals(item.itemDef.shortname, "wool", StringComparison.OrdinalIgnoreCase)
+                || !TryGetLivestockProduction(sheep, LivestockGene.Yield, out var production)) return false;
+            amount = Math.Max(0, production.WoolAmount);
+            return true;
+        }
+
+        private static int LivestockWoolShornCount(Sheep sheep)
+        {
+            int count = 0;
+            for (int section = 0; section < 4; section++)
+                if ((sheep.ShornQuadrants & (1 << section)) != 0) count++;
+            return count;
+        }
+
+        private static int LivestockWoolCumulativeAmount(int total, int sections)
+        {
+            // Pay fractional remainders on earlier cuts. A total of 1 must pay on
+            // the first cut, even if regrowth resets the fleece before the fourth.
+            return (int)(((long)Math.Max(0, total) * Math.Max(0, Math.Min(4, sections)) + 3L) / 4L);
+        }
+
+        [HarmonyPatch(typeof(Sheep), nameof(Sheep.FleeceAmount))]
+        private static class Sheep_FleeceAmount_Patch
+        {
+            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, ref int __result)
+            {
+                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount) == true)
+                    __result = amount;
+            }
+        }
+
+        [HarmonyPatch(typeof(Sheep), nameof(Sheep.ShornAmount))]
+        private static class Sheep_ShornAmount_Patch
+        {
+            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, ref int __result)
+            {
+                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount) != true) return;
+                int count = LivestockWoolShornCount(__instance);
+                __result = LivestockWoolCumulativeAmount(amount, count) - LivestockWoolCumulativeAmount(amount, count - 1);
+            }
+        }
+
+        [HarmonyPatch(typeof(Sheep), nameof(Sheep.UnshornAmount))]
+        private static class Sheep_UnshornAmount_Patch
+        {
+            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, ref int __result)
+            {
+                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount) == true)
+                    __result = amount - LivestockWoolCumulativeAmount(amount, LivestockWoolShornCount(__instance));
+            }
+        }
+
+        [HarmonyPatch(typeof(Sheep), nameof(Sheep.TryGetYield))]
+        private static class Sheep_TryGetYield_Patch
+        {
+            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ref ItemDefinition item,
+                [HarmonyArgument(1)] ref int amount, [HarmonyArgument(2)] ref float interval,
+                [HarmonyArgument(3)] ref float bestOfBreed, ref bool __result)
+            {
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) == true)
+                {
+                    interval = Math.Max(0f, production.WoolCooldownSeconds);
+                    bestOfBreed = _instance.LivestockBestOfBreed(__instance, amount, interval, wool: true);
+                    __result = item != null && amount > 0 && interval > 0f;
+                }
+            }
+        }
+
+        [HarmonyPatch(typeof(Cow), nameof(Cow.TryMilk))]
+        private static class Cow_TryMilk_Patch
+        {
+            private static bool Prefix(Cow __instance, ref bool __result, out LivestockCooldownState __state)
+            {
+                __state = default;
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) != true) return true;
+                if (production.MilkAmount <= 0)
+                {
+                    __result = false;
+                    return false;
+                }
+                if (float.IsNaN(production.MilkCooldownSeconds) || float.IsInfinity(production.MilkCooldownSeconds) || production.MilkCooldownSeconds < 0f) return true;
+                __state = new LivestockCooldownState { Applied = true, Original = __instance.MilkCooldown };
+                __instance.MilkCooldown = (float)Math.Min(float.MaxValue, (double)Math.Max(0f, production.MilkCooldownSeconds) * Math.Max(0.01f, __instance.GeneScale(LivestockGene.Yield)));
+                return true;
+            }
+
+            private static void Postfix(Cow __instance, bool __result, LivestockCooldownState __state)
+            {
+                if (__result) _instance?.RememberLivestockTimerStart(__instance, 5, __state.Applied, __state.Applied ? __state.Original : __instance.MilkCooldown);
+                Restore(__instance, __state);
+            }
+            private static Exception Finalizer(Cow __instance, LivestockCooldownState __state, Exception __exception)
+            {
+                Restore(__instance, __state);
+                return __exception;
+            }
+
+            private static void Restore(Cow animal, LivestockCooldownState state)
+            {
+                if (state.Applied) animal.MilkCooldown = state.Original;
+            }
+        }
+
+        [HarmonyPatch(typeof(Sheep), nameof(Sheep.Shear))]
+        private static class Sheep_Shear_Patch
+        {
+            private static void Prefix(Sheep __instance, out LivestockCooldownState __state)
+            {
+                __state = default;
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) != true) return;
+                if (float.IsNaN(production.WoolCooldownSeconds) || float.IsInfinity(production.WoolCooldownSeconds) || production.WoolCooldownSeconds < 0f) return;
+                __state = new LivestockCooldownState { Applied = true, Original = __instance.ShearCooldown };
+                __instance.ShearCooldown = (float)Math.Min(float.MaxValue, (double)Math.Max(0f, production.WoolCooldownSeconds) * Math.Max(0.01f, __instance.GeneScale(LivestockGene.Yield)));
+            }
+
+            private static void Postfix(Sheep __instance, bool __result, LivestockCooldownState __state)
+            {
+                if (__result) _instance?.RememberLivestockTimerStart(__instance, 6, __state.Applied, __state.Applied ? __state.Original : __instance.ShearCooldown);
+                Restore(__instance, __state);
+            }
+            private static Exception Finalizer(Sheep __instance, LivestockCooldownState __state, Exception __exception)
+            {
+                Restore(__instance, __state);
+                return __exception;
+            }
+
+            private static void Restore(Sheep animal, LivestockCooldownState state)
+            {
+                if (state.Applied) animal.ShearCooldown = state.Original;
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), "StartDungTimer")]
+        private static class LivestockAnimal_StartDungTimer_Patch
+        {
+            private static void Prefix(LivestockAnimal __instance, out LivestockCooldownState __state)
+            {
+                __state = default;
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Dung, out var production) != true) return;
+                if (float.IsNaN(production.DungIntervalSeconds) || float.IsInfinity(production.DungIntervalSeconds) || production.DungIntervalSeconds < 0f) return;
+                __state = new LivestockCooldownState { Applied = true, Original = __instance.DungInterval };
+                __instance.DungInterval = (float)Math.Min(float.MaxValue, (double)Math.Max(1f, production.DungIntervalSeconds) * Math.Max(0.01f, __instance.GeneScale(LivestockGene.Dung)));
+            }
+
+            private static void Postfix(LivestockAnimal __instance, LivestockCooldownState __state)
+            {
+                _instance?.RememberLivestockTimerStart(__instance, 4, __state.Applied, __state.Applied ? __state.Original : __instance.DungInterval);
+                Restore(__instance, __state);
+            }
+            private static Exception Finalizer(LivestockAnimal __instance, LivestockCooldownState __state, Exception __exception)
+            {
+                Restore(__instance, __state);
+                return __exception;
+            }
+
+            private static void Restore(LivestockAnimal animal, LivestockCooldownState state)
+            {
+                if (state.Applied) animal.DungInterval = state.Original;
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), nameof(LivestockAnimal.NextDungInterval))]
+        private static class LivestockAnimal_NextDungInterval_Patch
+        {
+            private static void Postfix(LivestockAnimal __instance, ref float __result)
+            {
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Dung, out var production) != true) return;
+                if (float.IsNaN(production.DungIntervalSeconds) || float.IsInfinity(production.DungIntervalSeconds) || production.DungIntervalSeconds < 0f) return;
+                var vanillaBase = __instance.DungInterval / Math.Max(0.01f, __instance.GeneScale(LivestockGene.Dung));
+                __result = vanillaBase > 0f
+                    ? (float)Math.Min(float.MaxValue, (double)__result * Math.Max(1f, production.DungIntervalSeconds) / vanillaBase)
+                    : Math.Max(1f, production.DungIntervalSeconds);
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), nameof(LivestockAnimal.SpawnDung))]
+        private static class LivestockAnimal_SpawnDung_Patch
+        {
+            private static bool Prefix(LivestockAnimal __instance, out bool __state)
+            {
+                __state = false;
+                var frame = new DungCreateFrame();
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Dung, out var production) == true)
+                {
+                    if (production.DungAmount <= 0) return false;
+                    frame.Definition = __instance.DungItem;
+                    frame.Amount = production.DungAmount;
+                }
+                (_dungCreateFrames ??= new Stack<DungCreateFrame>(2)).Push(frame);
+                __state = true;
+                return true;
+            }
+
+            private static void Finalizer(bool __state)
+            {
+                if (__state && _dungCreateFrames is { Count: > 0 }) _dungCreateFrames.Pop();
+            }
+        }
+
+        [HarmonyPatch]
+        private static class LivestockDung_ItemManager_Create_Patch
+        {
+            private static MethodBase TargetMethod()
+                => AccessTools.Method(typeof(ItemManager), nameof(ItemManager.Create),
+                    new[] { typeof(ItemDefinition), typeof(int), typeof(ulong), typeof(bool), typeof(ulong) });
+
+            private static void Prefix([HarmonyArgument(0)] ItemDefinition definition, [HarmonyArgument(1)] ref int amount)
+            {
+                if (definition == null || _dungCreateFrames is not { Count: > 0 }) return;
+                var frame = _dungCreateFrames.Peek();
+                if (ReferenceEquals(definition, frame.Definition))
+                    amount = frame.Amount;
+            }
+        }
+
         #region Harmony Patches
         [HarmonyPatch(typeof(BaseMission), "GiveRewards")]
         private static class BaseMission_GiveRewards_Patch
@@ -7293,54 +8459,38 @@ namespace Oxide.Plugins
                     return false;
                 }
 
-                if (_instance.Ore.PerResourceSpawning)
+                // Prefer the actual population contents over its name: a mixed
+                // population must retain every type that lacks a replacement.
+                if (pop.Prefabs is { Length: > 0 })
                 {
-                    if (string.Equals(name, "ores", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(name, "ores_sand", StringComparison.OrdinalIgnoreCase) ||
-                        string.Equals(name, "ores_snow", StringComparison.OrdinalIgnoreCase) ||
-                        name.Contains("ores_jungle", StringComparison.OrdinalIgnoreCase))
+                    bool containsManaged = false;
+                    foreach (var prefab in pop.Prefabs)
                     {
-                        return _instance.IsResourceCustomEnabled(OreType.Stone)
-                            && _instance.IsResourceCustomEnabled(OreType.Metal)
-                            && _instance.IsResourceCustomEnabled(OreType.Sulfur);
-                    }
-
-                    if (string.Equals(name, "hemp", StringComparison.OrdinalIgnoreCase))
-                        return _instance.IsResourceCustomEnabled(OreType.CollectHemp);
-
-                    if (name.Contains("mushroom", StringComparison.OrdinalIgnoreCase))
-                        return _instance.IsResourceCustomEnabled(OreType.CollectMushroom);
-                }
-                else if (string.Equals(name, "ores", StringComparison.OrdinalIgnoreCase) || 
-                    string.Equals(name, "ores_sand", StringComparison.OrdinalIgnoreCase) || 
-                    string.Equals(name, "ores_snow", StringComparison.OrdinalIgnoreCase) || 
-                    name.Contains("ores_jungle", StringComparison.OrdinalIgnoreCase) ||
-                    name.Contains("collectable", StringComparison.OrdinalIgnoreCase) ||
-                    name.Contains("mushroom", StringComparison.OrdinalIgnoreCase) ||
-                    string.Equals(name, "hemp", StringComparison.OrdinalIgnoreCase) ||
-                    name.Contains("berry", StringComparison.OrdinalIgnoreCase))
-                {
-                    return true;
-                }
-
-                if (pop.Prefabs is not { Length: > 0 }) return false;
-                var containsManaged = false;
-                var containsUnmanaged = false;
-
-                foreach (var prefab in pop.Prefabs)
-                {
-                    if (prefab == null || string.IsNullOrEmpty(prefab.Name)) continue;
-                    var inferred = _instance.InferOreTypeFromPrefab(prefab.Name);
-                    if (inferred.HasValue && _instance.IsResourceCustomEnabled(inferred.Value))
+                        if (prefab == null || string.IsNullOrEmpty(prefab.Name)) continue;
+                        var inferred = _instance.InferOreTypeFromPrefab(prefab.Name);
+                        if (!inferred.HasValue || !_instance.IsResourceCustomEnabled(inferred.Value)
+                            || !_instance._nativeSuppressedTypes.Contains(inferred.Value)) return false;
                         containsManaged = true;
-                    else
-                    {
-                        containsUnmanaged = true;
-                        break;
                     }
+                    return containsManaged;
                 }
 
-                return containsManaged && !containsUnmanaged;
+                if (string.Equals(name, "ores", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "ores_sand", StringComparison.OrdinalIgnoreCase) ||
+                    string.Equals(name, "ores_snow", StringComparison.OrdinalIgnoreCase) ||
+                    name.Contains("ores_jungle", StringComparison.OrdinalIgnoreCase))
+                {
+                    return _instance._nativeSuppressedTypes.Contains(OreType.Stone)
+                        && _instance._nativeSuppressedTypes.Contains(OreType.Metal)
+                        && _instance._nativeSuppressedTypes.Contains(OreType.Sulfur);
+                }
+
+                if (string.Equals(name, "hemp", StringComparison.OrdinalIgnoreCase))
+                    return _instance._nativeSuppressedTypes.Contains(OreType.CollectHemp);
+
+                if (name.Contains("mushroom", StringComparison.OrdinalIgnoreCase))
+                    return _instance._nativeSuppressedTypes.Contains(OreType.CollectMushroom);
+                return false;
             }
         }
 
@@ -7362,13 +8512,8 @@ namespace Oxide.Plugins
                 _instance.timer.Once(respawnDelay, () =>
                 {
                     if (_instance is null) return;
-                    RespawnOre(oreData, settings);
+                    _instance.TryRespawnResource(oreData, settings);
                 });
-            }
-
-            private static void RespawnOre(OreNodeData oreData, OreTypeSettings settings)
-            {
-                _instance.TryRespawnResource(oreData, settings);
             }
         }
 
@@ -7454,14 +8599,14 @@ namespace Oxide.Plugins
                 return false;
             var inferred = InferOreTypeFromPrefab(entity.PrefabName);
             if (!inferred.HasValue) return false;
-            if (Ore.PerResourceSpawning)
-                return IsResourceCustomEnabled(inferred.Value);
-            return true;
+            return IsResourceCustomEnabled(inferred.Value) && _nativeSuppressedTypes.Contains(inferred.Value);
         }
 
         private void OnEntitySpawned(BaseNetworkable entity)
         {
-            if (!Ore.DisableNativeSpawning || !Ore.PerResourceSpawning) return;
+            if (entity is LivestockAnimal animal)
+                NextTick(() => RefreshLivestockProductionTimers(animal));
+            if (!Ore.DisableNativeSpawning) return;
             if (entity is not BaseEntity worldEntity || worldEntity.IsDestroyed) return;
             if (worldEntity is not OreResourceEntity and not CollectibleEntity) return;
             if (spawnedOres.ContainsKey(worldEntity)) return;
@@ -7469,7 +8614,7 @@ namespace Oxide.Plugins
 
             NextTick(() =>
             {
-                if (!Ore.DisableNativeSpawning || !Ore.PerResourceSpawning) return;
+                if (!Ore.DisableNativeSpawning) return;
                 if (worldEntity is null || worldEntity.IsDestroyed) return;
                 if (spawnedOres.ContainsKey(worldEntity)) return;
                 if (!IsNativeManagedEntity(worldEntity)) return;
@@ -7477,7 +8622,7 @@ namespace Oxide.Plugins
             });
         }
 
-        private void CleanupNativeOres()
+        private void CleanupNativeOres(OreType? onlyType = null)
         {
             var toKill = Pool.Get<List<BaseEntity>>();
 
@@ -7485,6 +8630,7 @@ namespace Oxide.Plugins
             {
                 if (entity is not BaseEntity { IsDestroyed: false } worldEntity) continue;
                 if (!IsNativeManagedEntity(worldEntity) || spawnedOres.ContainsKey(worldEntity)) continue;
+                if (onlyType.HasValue && InferOreTypeFromPrefab(worldEntity.PrefabName) != onlyType) continue;
                 toKill.Add(worldEntity);
             }
 
@@ -7652,21 +8798,67 @@ namespace Oxide.Plugins
             if (!settings.OverrideGatherAmounts)
                 return null;
 
-            ApplyQuarryOutputOverride(settings, key, item);
-            return item.amount <= 0 ? (object)true : null;
+            // Own the whole configured output list; Rust disposes the source
+            // item when this hook returns non-null.
+            return ProduceConfiguredQuarryOutputs(quarry, settings, key, item) ? (object)true : null;
         }
 
-        private object OnExcavatorGather(ExcavatorArm excavator, Item item)
+        private object? OnExcavatorGather(ExcavatorArm excavator, Item item)
         {
             if (excavator == null || item?.info == null)
                 return null;
             if (ShouldSkipQuarryGatherOverride())
                 return null;
-            if (!TryGetQuarryHarvestSettings(QUARRY_EXCAVATOR_KEY, out var settings) || !settings.OverrideGatherAmounts)
+            if (!TryGetQuarryHarvestSettings(QUARRY_EXCAVATOR_KEY, out var container) || container.MiningModes == null)
                 return null;
 
-            ApplyQuarryOutputOverride(settings, QUARRY_EXCAVATOR_KEY, item);
-            return item.amount <= 0 ? (object)true : null;
+            var mode = ExcavatorModeResources.FirstOrDefault(pair =>
+                string.Equals(pair.Value, item.info.shortname, StringComparison.OrdinalIgnoreCase)).Key;
+            if (mode == null || !container.MiningModes.TryGetValue(mode, out var settings) || settings == null)
+                return null;
+            var machine = excavator.GetParentEntity() ?? excavator;
+            var modes = _excavatorGatherStates.GetOrCreateValue(machine).Modes;
+            if (!settings.OverrideGatherAmounts || settings.Outputs == null)
+            {
+                modes.Remove(mode);
+                return null;
+            }
+            if (excavator.outputPiles == null || excavator.outputPiles.Count == 0
+                || excavator.outputPiles.Any(pile => pile == null || pile.inventory == null))
+                return null;
+            if (!modes.TryGetValue(mode, out var state))
+                modes[mode] = state = new QuarryGatherState();
+
+            // Rust has already debited the pending resources for BOTH piles.
+            // Returning non-null aborts ProduceResources, so replace all piles
+            // here on the first callback, then explicitly dispose its source.
+            int vanilla = VanillaQuarryPerDiesel[QUARRY_EXCAVATOR_KEY][item.info.shortname];
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var output in settings.Outputs)
+            {
+                if (output == null || string.IsNullOrWhiteSpace(output.Shortname) || !seen.Add(output.Shortname)) continue;
+                var definition = ItemManager.FindItemDefinition(output.Shortname);
+                if (definition == null)
+                {
+                    state.Items.Remove(output.Shortname);
+                    if (_quarryOutputWarnings.Add(QUARRY_EXCAVATOR_KEY + ":" + mode + ":" + output.Shortname))
+                        Log($"Could not create excavator output '{output.Shortname}' for {mode}: item is unavailable. The saved setting is retained.");
+                    continue;
+                }
+                foreach (var pile in excavator.outputPiles)
+                {
+                    int amount = GetQuarryOutputAmount(state, output.Shortname, output.Amount, vanilla, item.amount);
+                    if (amount <= 0) continue;
+                    var created = ItemManager.Create(definition, amount);
+                    if (created == null) continue;
+                    if (!created.MoveToContainer(pile.inventory))
+                        created.Drop(pile.GetDropPosition(), pile.GetDropVelocity());
+                }
+            }
+            foreach (var stale in state.Items.Keys.Where(name => !seen.Contains(name)).ToList())
+                state.Items.Remove(stale);
+            item.Remove();
+            return true;
         }
 
         private bool TryGetQuarryHarvestSettings(string key, out QuarryHarvestSettings settings)
@@ -7682,6 +8874,8 @@ namespace Oxide.Plugins
             if (quarry == null)
                 return null;
 
+            // Static quarries share miningquarry_static; their resource type is
+            // carried by staticType, not the network prefab name.
             switch (quarry.staticType)
             {
                 case MiningQuarry.QuarryType.HQM:
@@ -7705,38 +8899,97 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private static void ApplyQuarryOutputOverride(QuarryHarvestSettings settings, string key, Item item)
+        private sealed class QuarryGatherState
         {
-            if (settings?.Outputs == null || item?.info == null)
-                return;
+            public readonly Dictionary<string, QuarryGatherRemainder> Items = new Dictionary<string, QuarryGatherRemainder>(StringComparer.OrdinalIgnoreCase);
+        }
 
-            var shortname = item.info.shortname;
-            int? configured = null;
-            for (var i = 0; i < settings.Outputs.Count; i++)
+        private sealed class QuarryGatherRemainder
+        {
+            public int Configured;
+            public int Vanilla;
+            public long Numerator;
+        }
+
+        private sealed class ExcavatorGatherState
+        {
+            public readonly Dictionary<string, QuarryGatherState> Modes = new Dictionary<string, QuarryGatherState>(StringComparer.OrdinalIgnoreCase);
+        }
+
+        private readonly ConditionalWeakTable<BaseEntity, ExcavatorGatherState> _excavatorGatherStates = new ConditionalWeakTable<BaseEntity, ExcavatorGatherState>();
+        private readonly ConditionalWeakTable<BaseEntity, QuarryGatherState> _quarryGatherStates = new ConditionalWeakTable<BaseEntity, QuarryGatherState>();
+        private readonly HashSet<string> _quarryOutputWarnings = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+
+        private bool ProduceConfiguredQuarryOutputs(MiningQuarry quarry, QuarryHarvestSettings settings, string key, Item source)
+        {
+            if (settings.Outputs == null || !VanillaQuarryPerDiesel.TryGetValue(key, out var vanillaMap))
+                return false;
+
+            // The stone quarry emits stones and metal from the same fuel work.
+            // Use one clock so a custom item is not paid once for each product.
+            var clock = key == QUARRY_STONE_KEY ? "stones"
+                : key == QUARRY_SULFUR_KEY ? "sulfur.ore" : "hq.metal.ore";
+            if (!string.Equals(source.info.shortname, clock, StringComparison.OrdinalIgnoreCase))
+                return true;
+            var hopper = quarry.hopperPrefab?.instance?.GetComponent<StorageContainer>()?.inventory;
+            if (hopper == null)
+                return false;
+
+            var state = _quarryGatherStates.GetOrCreateValue(quarry);
+            var seen = new HashSet<string>(StringComparer.OrdinalIgnoreCase);
+            foreach (var output in settings.Outputs)
             {
-                var output = settings.Outputs[i];
-                if (output != null && string.Equals(output.Shortname, shortname, StringComparison.OrdinalIgnoreCase))
+                if (output == null || string.IsNullOrWhiteSpace(output.Shortname) || !seen.Add(output.Shortname))
+                    continue;
+                var amount = GetQuarryOutputAmount(quarry, output.Shortname, output.Amount, vanillaMap[clock], source.amount);
+                if (amount <= 0)
+                    continue;
+                var definition = ItemManager.FindItemDefinition(output.Shortname);
+                if (definition == null)
                 {
-                    configured = output.Amount;
-                    break;
+                    if (_quarryOutputWarnings.Add(key + ":" + output.Shortname))
+                        Log($"Could not create quarry output '{output.Shortname}' for {key}: item is unavailable. The saved setting is retained.");
+                    continue;
+                }
+                var created = ItemManager.Create(definition, amount);
+                if (created == null)
+                    continue;
+                if (!created.MoveToContainer(hopper))
+                {
+                    created.Remove();
+                    quarry.SetOn(false);
                 }
             }
+            // Removed entries cannot recover fractional credit if added later.
+            foreach (var stale in state.Items.Keys.Where(name => !seen.Contains(name)).ToList())
+                state.Items.Remove(stale);
+            return true;
+        }
 
-            if (!configured.HasValue)
-                return;
-            if (!VanillaQuarryPerDiesel.TryGetValue(key, out var vanillaMap)
-                || !vanillaMap.TryGetValue(shortname, out var vanilla)
-                || vanilla <= 0)
-                return;
+        private int GetQuarryOutputAmount(BaseEntity machine, string shortname, int configured, int vanilla, int nativeAmount)
+        {
+            return GetQuarryOutputAmount(_quarryGatherStates.GetOrCreateValue(machine), shortname, configured, vanilla, nativeAmount);
+        }
 
-            if (configured.Value <= 0)
+        private static int GetQuarryOutputAmount(QuarryGatherState state, string shortname, int configured, int vanilla, int nativeAmount)
+        {
+            if (configured <= 0)
             {
-                item.amount = 0;
-                return;
+                state.Items.Remove(shortname);
+                return 0;
             }
 
-            long scaled = (long)item.amount * configured.Value / vanilla;
-            item.amount = (int)Math.Max(1, Math.Min(int.MaxValue, scaled));
+            if (!state.Items.TryGetValue(shortname, out var remainder)
+                || remainder.Configured != configured || remainder.Vanilla != vanilla)
+            {
+                remainder = new QuarryGatherRemainder { Configured = configured, Vanilla = vanilla };
+                state.Items[shortname] = remainder;
+            }
+            // Carry integer remainders across batches instead of rounding every
+            // small positive batch up to one item. State is local to this machine.
+            long numerator = (long)Math.Max(0, nativeAmount) * configured + remainder.Numerator;
+            remainder.Numerator = numerator % vanilla;
+            return (int)Math.Min(int.MaxValue, numerator / vanilla);
         }
 
         private void OnPluginLoaded(Plugin plugin)
@@ -7751,6 +9004,7 @@ namespace Oxide.Plugins
 
             _loggedGatherStandDown = false;
             NotifyGatherStandDownIfNeeded();
+            NextTick(() => RefreshLivestockProductionTimers());
         }
 
         private void OnPluginUnloaded(Plugin plugin)
@@ -7764,6 +9018,7 @@ namespace Oxide.Plugins
                 return;
 
             _loggedGatherStandDown = false;
+            NextTick(() => RefreshLivestockProductionTimers());
         }
 
         private object FinishOwnedDispenserHit(BasePlayer player, Item item, bool isBonus)
@@ -7773,6 +9028,8 @@ namespace Oxide.Plugins
 
             if (player != null && item != null && item.amount > 0)
                 player.GiveItem(item, BaseEntity.GiveItemReason.ResourceHarvested);
+            else
+                item?.Remove();
 
             return true;
         }
@@ -7780,6 +9037,100 @@ namespace Oxide.Plugins
         private object OnDispenserGather(ResourceDispenser dispenser, BasePlayer player, Item item)
         {
             return HandleDispenserYield(dispenser, player, item, false);
+        }
+
+        private sealed class DispenserYieldFrame
+        {
+            public ResourceDispenser Dispenser;
+            public BasePlayer Player;
+            public ItemAmount Source;
+            public float Before;
+            public bool Eligible;
+            public bool NativeItemCreated;
+        }
+
+        [ThreadStatic] private static Stack<DispenserYieldFrame> _dispenserYieldFrames;
+
+        private bool HasConfiguredDispenserOutputs(BaseEntity entity)
+        {
+            if (entity == null) return false;
+            OreTypeSettings node;
+            if (spawnedOres.TryGetValue(entity, out var data))
+                node = GetOreTypeSettings(data.Type);
+            else
+            {
+                if (TryGetNpcHarvestSettings(entity, out var harvest))
+                    return harvest.OverrideGatherAmounts && harvest.GatherOutputs is { Count: > 0 };
+                var type = entity is TreeEntity ? OreType.Tree : InferOreTypeFromPrefab(entity.PrefabName);
+                node = type.HasValue && IsNodeType(type.Value) ? GetOreTypeSettings(type.Value) : null;
+            }
+            return node is { OverrideGatherAmounts: true, GatherOutputs: { Count: > 0 } };
+        }
+
+        private static bool ShouldCompleteSilentGather(bool originalRan, bool eligible, bool nativeItemCreated, float before, float after)
+            => originalRan && eligible && !nativeItemCreated && before > 0f && after >= 0f && after < before;
+
+        // Rust sometimes consumes the last fractional resource without creating an
+        // item or firing OnDispenserGather. Observe that specific native call, then
+        // use the same rate/veto path and payment ledger as an ordinary callback.
+        [HarmonyPatch(typeof(ResourceDispenser), "GiveResourceFromItem")]
+        private static class ResourceDispenser_SilentYield_Patch
+        {
+            private static void Prefix(ResourceDispenser __instance, [HarmonyArgument(0)] BasePlayer player,
+                [HarmonyArgument(1)] ItemAmount source, out DispenserYieldFrame __state)
+            {
+                __state = null;
+                if (_instance == null || !Initialized || player == null || source?.itemDef == null) return;
+                bool eligible = !_instance.ShouldStandDownGatherRates() && _instance.HasConfiguredDispenserOutputs(__instance.baseEntity);
+                if (!eligible && _dispenserYieldFrames is not { Count: > 0 }) return;
+                __state = new DispenserYieldFrame
+                {
+                    Dispenser = __instance, Player = player, Source = source, Before = source.amount, Eligible = eligible
+                };
+                (_dispenserYieldFrames ??= new Stack<DispenserYieldFrame>(2)).Push(__state);
+            }
+
+            private static void Postfix(DispenserYieldFrame __state, bool __runOriginal)
+            {
+                if (__state == null || _instance == null
+                    || !ShouldCompleteSilentGather(__runOriginal, __state.Eligible, __state.NativeItemCreated, __state.Before, __state.Source.amount)) return;
+                var item = ItemManager.Create(__state.Source.itemDef, 1);
+                if (item == null) return;
+                item.amount = 0;
+                bool owned = false;
+                try
+                {
+                    owned = _instance.HandleDispenserYield(__state.Dispenser, __state.Player, item, false) != null;
+                }
+                catch (Exception ex)
+                {
+                    Log($"Could not settle a silent gather yield: {ex.Message}");
+                }
+                finally
+                {
+                    if (!owned || item.amount <= 0) item.Remove();
+                }
+            }
+
+            private static void Finalizer(DispenserYieldFrame __state)
+            {
+                if (__state != null && _dispenserYieldFrames is { Count: > 0 }) _dispenserYieldFrames.Pop();
+            }
+        }
+
+        [HarmonyPatch]
+        private static class DispenserYield_ItemCreation_Patch
+        {
+            private static MethodBase TargetMethod()
+                => AccessTools.Method(typeof(ItemManager), nameof(ItemManager.CreateByItemID),
+                    new[] { typeof(int), typeof(int), typeof(ulong), typeof(ulong) });
+
+            private static void Prefix()
+            {
+                // Creation, even if another plugin takes ownership of the item or
+                // it fails, proves that this is not a missing native callback.
+                if (_dispenserYieldFrames is { Count: > 0 }) _dispenserYieldFrames.Peek().NativeItemCreated = true;
+            }
         }
 
         private object OnDispenserBonus(ResourceDispenser dispenser, BasePlayer player, Item item)
@@ -7839,7 +9190,7 @@ namespace Oxide.Plugins
                 && npcHarvest.GatherOutputs is { Count: > 0 })
             {
                 var dummy = new OreNodeData(OreType.Stone, entity.transform.position, default(TerrainBiome.Enum), 1f, entity.PrefabName);
-                ApplyGatherOverride(dispenser, player, item, dummy, npcHarvest.GatherOutputs, isBonus);
+                ApplyGatherOverride(dispenser, player, item, dummy, npcHarvest.GatherOutputs, isBonus, preserveUnmatched: entity is LivestockCorpse);
                 return FinishOwnedDispenserHit(player, item, isBonus);
             }
 
@@ -7876,6 +9227,16 @@ namespace Oxide.Plugins
             settings = null;
             if (entity is null || Ore.NpcHarvest == null || Ore.NpcHarvest.Count == 0)
                 return false;
+
+            if (entity is LivestockCorpse livestock)
+            {
+                if (_livestockCorpseSources.TryGetValue(livestock, out var source)
+                    && TryMatchNpcHarvest(source.Key, out settings))
+                    return true;
+                if (livestock.parentEnt is LivestockAnimal animal
+                    && TryMatchNpcHarvest(LivestockKey(animal), out settings))
+                    return true;
+            }
 
             if (entity is NPCPlayerCorpse)
             {
@@ -7977,33 +9338,114 @@ namespace Oxide.Plugins
                 || prefab.IndexOf(file.Replace('_', '-'), StringComparison.OrdinalIgnoreCase) >= 0;
         }
 
+        private sealed class GatherBonusFrame
+        {
+            public ResourceDispenser Dispenser;
+            public BasePlayer Player;
+            public Modifier.ModifierType Type;
+            public float Before;
+            public bool Captured, Restored, Applying;
+        }
+
+        [ThreadStatic] private static Stack<GatherBonusFrame> _gatherBonusFrames;
+        private static readonly Func<ResourceDispenser, BaseEntity, ItemAmount, float, int> NativeGatherBonus =
+            (Func<ResourceDispenser, BaseEntity, ItemAmount, float, int>)Delegate.CreateDelegate(
+                typeof(Func<ResourceDispenser, BaseEntity, ItemAmount, float, int>),
+                AccessTools.Method(typeof(ResourceDispenser), "CalculateGatherBonus"));
+
+        // Native tea calculation runs before the hooks and changes the player's
+        // fractional bonus credit. Capture that credit so an owned payout can
+        // replace the native calculation, including across finish-bonus items.
+        [HarmonyPatch]
+        private static class ResourceDispenser_GatherBonusScope_Patch
+        {
+            private static IEnumerable<MethodBase> TargetMethods()
+            {
+                yield return AccessTools.Method(typeof(ResourceDispenser), "GiveResourceFromItem");
+                yield return AccessTools.Method(typeof(ResourceDispenser), "AssignFinishBonus");
+            }
+
+            private static void Prefix(ResourceDispenser __instance, out GatherBonusFrame __state)
+            {
+                __state = null;
+                if (_instance == null || !Initialized || !_instance.HasConfiguredDispenserOutputs(__instance.baseEntity)) return;
+                __state = new GatherBonusFrame { Dispenser = __instance };
+                (_gatherBonusFrames ??= new Stack<GatherBonusFrame>(2)).Push(__state);
+            }
+
+            private static void Finalizer(GatherBonusFrame __state)
+            {
+                if (__state != null && _gatherBonusFrames is { Count: > 0 }) _gatherBonusFrames.Pop();
+            }
+        }
+
+        [HarmonyPatch(typeof(ResourceDispenser), "CalculateGatherBonus")]
+        private static class ResourceDispenser_GatherBonusCredit_Patch
+        {
+            private static void Prefix(ResourceDispenser __instance, [HarmonyArgument(0)] BaseEntity entity)
+            {
+                if (_gatherBonusFrames is not { Count: > 0 } || entity is not BasePlayer player || player.modifiers == null) return;
+                var frame = _gatherBonusFrames.Peek();
+                if (frame.Dispenser != __instance || frame.Applying) return;
+                switch (__instance.gatherType)
+                {
+                    case ResourceDispenser.GatherType.Tree: frame.Type = Modifier.ModifierType.Wood_Yield; break;
+                    case ResourceDispenser.GatherType.Ore: frame.Type = Modifier.ModifierType.Ore_Yield; break;
+                    case ResourceDispenser.GatherType.Flesh: frame.Type = Modifier.ModifierType.Harvesting; break;
+                    default: return;
+                }
+                frame.Player = player;
+                frame.Before = player.modifiers.GetVariableValue(frame.Type, 0f);
+                frame.Captured = true;
+                frame.Restored = false;
+            }
+        }
+
+        private static void RestoreNativeGatherBonus(ResourceDispenser dispenser, BasePlayer player)
+        {
+            if (_gatherBonusFrames is not { Count: > 0 } || player.modifiers == null) return;
+            var frame = _gatherBonusFrames.Peek();
+            if (frame.Dispenser != dispenser || frame.Player != player || !frame.Captured || frame.Restored) return;
+            player.modifiers.SetVariableValue(frame.Type, frame.Before);
+            frame.Restored = true;
+        }
+
+        private static int ApplyGatherYieldBonus(ResourceDispenser dispenser, BasePlayer player, ItemDefinition definition, int amount, int target)
+        {
+            if (amount <= 0 || definition == null || player.modifiers == null) return amount;
+            // Use Rust's resource eligibility, modifier selection and fractional
+            // carry. Ore/wood teas must not boost arbitrary replacement products.
+            var source = dispenser.containedItems?.Find(entry => entry?.itemDef == definition)
+                ?? dispenser.finishBonus?.Find(entry => entry?.itemDef == definition)
+                ?? new ItemAmount(definition, target);
+            var frame = _gatherBonusFrames is { Count: > 0 } ? _gatherBonusFrames.Peek() : null;
+            if (frame != null) frame.Applying = true;
+            try
+            {
+                return (int)Math.Min(int.MaxValue, (long)amount + NativeGatherBonus(dispenser, player, source, amount));
+            }
+            finally
+            {
+                if (frame != null) frame.Applying = false;
+            }
+        }
+
         private bool ApplyGatherOverride(ResourceDispenser dispenser, BasePlayer player, Item item, OreNodeData oreData, OreTypeSettings settings, bool isBonus)
             => ApplyGatherOverride(dispenser, player, item, oreData, settings.GatherOutputs, isBonus, GetConfiguredGatherMultiplier(settings));
 
-        private bool ApplyGatherOverride(ResourceDispenser dispenser, BasePlayer player, Item item, OreNodeData oreData, List<OreGatherOutput> outputs, bool isBonus, float configuredMultiplier = 1f)
+        private bool ApplyGatherOverride(ResourceDispenser dispenser, BasePlayer player, Item item, OreNodeData oreData, List<OreGatherOutput> outputs, bool isBonus, float configuredMultiplier = 1f, bool preserveUnmatched = false)
         {
             var entity = dispenser.baseEntity;
             if (entity is null || outputs == null) return false;
 
             var session = GetOrCreateGatherSession(entity, dispenser, item);
             var tool = GetHeldToolShortname(player);
-            session.LastTool = tool;
-
-            if (Time.frameCount != session.LastFrame)
-            {
-                session.LastFrame = Time.frameCount;
-                session.ExtraGrantedThisFrame.Clear();
-            }
 
             var rich = oreData.GatherMultiplier > 0f ? oreData.GatherMultiplier : 1f;
             var configured = configuredMultiplier > 0f ? configuredMultiplier : 1f;
             var multiplier = rich * configured;
             var vanillaName = item.info?.shortname ?? string.Empty;
-            var vanillaHit = Mathf.Max(0, item.amount);
-            var startForItem = session.VanillaStartByItem.TryGetValue(vanillaName, out var itemStart) ? itemStart : 0f;
-            var fraction = startForItem > 0f
-                ? vanillaHit / startForItem
-                : (session.VanillaStartTotal > 0f ? vanillaHit / session.VanillaStartTotal : 0f);
+            var progress = GetGatherProgress(dispenser, session, vanillaName, isBonus);
 
             OreGatherOutput match = FindGatherOutput(outputs, vanillaName);
             if (match == null && oreData.Type == OreType.HQM && vanillaName == METAL_ORE_SHORTNAME)
@@ -8014,44 +9456,44 @@ namespace Oxide.Plugins
                     var hqmDef = ItemManager.FindItemDefinition(HQM_ORE_SHORTNAME);
                     if (hqmDef != null)
                         item.info = hqmDef;
-                    vanillaName = HQM_ORE_SHORTNAME;
                 }
             }
 
             if (match != null)
             {
+                RestoreNativeGatherBonus(dispenser, player);
                 var target = Mathf.RoundToInt(GetConfiguredToolAmount(match, tool) * multiplier);
                 session.GivenByItem.TryGetValue(match.Shortname, out var already);
-                var remaining = Mathf.Max(0, target - already);
-                var give = isBonus ? remaining : Mathf.Clamp(Mathf.RoundToInt(target * fraction), 0, remaining);
-                item.amount = give;
+                var give = GetGatherEntitlement(target, progress, already);
+                item.amount = ApplyGatherYieldBonus(dispenser, player, item.info, give, target);
                 session.GivenByItem[match.Shortname] = already + give;
             }
-            else
+            else if (!preserveUnmatched)
             {
+                RestoreNativeGatherBonus(dispenser, player);
                 item.amount = 0;
             }
 
             foreach (var output in outputs)
             {
                 if (output == null || string.IsNullOrEmpty(output.Shortname)) continue;
+                if (preserveUnmatched && string.Equals(output.Shortname, "wool", StringComparison.OrdinalIgnoreCase)
+                    && !session.VanillaStartByItem.ContainsKey(output.Shortname))
+                    continue;
                 if (match != null && string.Equals(output.Shortname, match.Shortname, StringComparison.OrdinalIgnoreCase))
                     continue;
                 if (session.VanillaStartByItem.ContainsKey(output.Shortname))
                     continue;
-                if (!session.ExtraGrantedThisFrame.Add(output.Shortname))
-                    continue;
-
                 var target = Mathf.RoundToInt(GetConfiguredToolAmount(output, tool) * multiplier);
                 session.GivenByItem.TryGetValue(output.Shortname, out var already);
-                var remaining = Mathf.Max(0, target - already);
-                var give = isBonus ? remaining : Mathf.Clamp(Mathf.RoundToInt(target * fraction), 0, remaining);
+                var give = GetGatherEntitlement(target, GetGatherProgress(dispenser, session, null, isBonus), already);
                 if (give <= 0) continue;
 
                 var def = ItemManager.FindItemDefinition(output.Shortname);
                 if (def == null) continue;
                 var extra = ItemManager.Create(def, give);
                 if (extra == null) continue;
+                extra.amount = ApplyGatherYieldBonus(dispenser, player, def, give, target);
                 player.GiveItem(extra, BaseEntity.GiveItemReason.ResourceHarvested);
                 session.GivenByItem[output.Shortname] = already + give;
             }
@@ -8073,7 +9515,9 @@ namespace Oxide.Plugins
                 foreach (var contained in dispenser.containedItems)
                 {
                     if (contained?.itemDef == null) continue;
-                    var amount = contained.amount;
+                    // Rust has already removed both the gathered and tool-destroyed
+                    // resources before calling the hook. startAmount retains the pool.
+                    var amount = Mathf.Max(contained.startAmount, contained.amount);
                     session.VanillaStartTotal += amount;
                     if (!session.VanillaStartByItem.ContainsKey(contained.itemDef.shortname))
                         session.VanillaStartByItem[contained.itemDef.shortname] = 0f;
@@ -8082,18 +9526,43 @@ namespace Oxide.Plugins
             }
 
             var hitName = item.info?.shortname;
-            if (!string.IsNullOrEmpty(hitName))
+            if (!string.IsNullOrEmpty(hitName) && !session.VanillaStartByItem.ContainsKey(hitName))
             {
                 session.VanillaStartTotal += item.amount;
-                if (!session.VanillaStartByItem.ContainsKey(hitName))
-                    session.VanillaStartByItem[hitName] = 0f;
-                session.VanillaStartByItem[hitName] += item.amount;
+                session.VanillaStartByItem[hitName] = item.amount;
             }
 
             session.VanillaStartTotal = Mathf.Max(1f, session.VanillaStartTotal);
             _oreGatherSessions[entity] = session;
             return session;
         }
+
+        private static float GetGatherProgress(ResourceDispenser dispenser, OreGatherSession session, string? shortname, bool isBonus)
+        {
+            if (isBonus) return 1f;
+            float start = session.VanillaStartTotal;
+            if (!string.IsNullOrEmpty(shortname) && session.VanillaStartByItem.TryGetValue(shortname, out var itemStart))
+                start = itemStart;
+            else
+                shortname = null;
+
+            float remaining = 0f;
+            if (dispenser.containedItems != null)
+            {
+                foreach (var contained in dispenser.containedItems)
+                {
+                    if (contained?.itemDef == null) continue;
+                    if (shortname == null || string.Equals(shortname, contained.itemDef.shortname, StringComparison.OrdinalIgnoreCase))
+                        remaining += Mathf.Max(0f, contained.amount);
+                }
+            }
+            return start > 0f ? Mathf.Clamp01(1f - remaining / start) : 1f;
+        }
+
+        // Pay the cumulative entitlement, so rounding and destroyed resources do not
+        // reduce the configured total. The given ledger also deduplicates extra outputs.
+        private static int GetGatherEntitlement(int target, float progress, int already)
+            => Mathf.Max(0, Mathf.RoundToInt(Mathf.Max(0, target) * Mathf.Clamp01(progress)) - already);
 
         private static OreGatherOutput FindGatherOutput(List<OreGatherOutput> outputs, string shortname)
         {
@@ -8153,9 +9622,10 @@ namespace Oxide.Plugins
             return settings != null;
         }
 
-        private object OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player)
+        private object OnCollectiblePickup(CollectibleEntity collectible, BasePlayer player, bool eat)
         {
-            if (collectible is null || player is null) return null;
+            if (collectible is null || player is null || collectible.IsDestroyed) return null;
+            if (collectible.itemList == null) return true;
             if (!TryGetCollectablePickupContext(collectible, out var type, out var settings))
                 return null;
 
@@ -8166,9 +9636,13 @@ namespace Oxide.Plugins
                 return null;
             }
 
-            if (HasPickupOutputOverride(settings))
+            if (HasPickupOutputOverride(settings) || settings.PickupMaxAmount > 0)
             {
-                GiveConfiguredPickupOutputs(player, settings);
+                // Rust clears itemList after a native pickup. Claim it before
+                // giving custom items so another pickup cannot pay it twice.
+                var nativeOutputs = collectible.itemList;
+                collectible.itemList = null;
+                GiveConfiguredPickupOutputs(player, settings, eat, nativeOutputs);
                 ProcessBonusLoot(player, type);
                 NextTick(() =>
                 {
@@ -8183,7 +9657,7 @@ namespace Oxide.Plugins
             return null;
         }
 
-        private void OnCollectiblePickup(Item item, BasePlayer player, CollectibleEntity collectible)
+        private void OnCollectiblePickedup(CollectibleEntity collectible, BasePlayer player, Item item)
         {
             if (!TryGetCollectablePickupContext(collectible, out _, out var settings))
                 return;
@@ -8202,14 +9676,40 @@ namespace Oxide.Plugins
             var max = settings.PickupMaxAmount;
             var min = settings.PickupMinAmount > 0 ? settings.PickupMinAmount : max;
             if (max < min) max = min;
-            item.amount = UnityEngine.Random.Range(min, max + 1);
+            item.amount = GetPickupAmount(min, max);
         }
 
-        private static void GiveConfiguredPickupOutputs(BasePlayer player, OreTypeSettings settings)
+        private static int GetPickupAmount(int min, int max)
         {
-            if (player is null || settings?.PickupOutputs == null) return;
+            min = Math.Max(0, min);
+            max = Math.Max(min, max);
+            if (min == max) return min;
+            if (max < int.MaxValue) return UnityEngine.Random.Range(min, max + 1);
+            return (int)(min + (long)(RNG!.NextDouble() * ((long)max - min + 1L)));
+        }
 
-            foreach (var output in settings.PickupOutputs)
+        private static void GiveConfiguredPickupOutputs(BasePlayer player, OreTypeSettings settings, bool eat, ItemAmount[] nativeOutputs)
+        {
+            if (player is null || settings == null) return;
+
+            var outputs = settings.PickupOutputs;
+            if (!HasPickupOutputOverride(settings))
+            {
+                var max = settings.PickupMaxAmount;
+                var min = settings.PickupMinAmount > 0 ? settings.PickupMinAmount : max;
+                outputs = nativeOutputs?.Where(source => source?.itemDef != null).Select(source => new OrePickupOutput
+                {
+                    Shortname = source.itemDef.shortname, MinAmount = min, MaxAmount = Math.Max(min, max)
+                }).ToList();
+            }
+            if (outputs == null) return;
+
+            // Rust rolls once per collectible, shared by every output and the
+            // pickup-and-eat path. Resource teas do not apply to ground pickups.
+            var chance = player.modifiers != null ? player.modifiers.GetValue(Modifier.ModifierType.Collectible_DoubleYield, 0f) : 0f;
+            var doubled = chance != 0f && UnityEngine.Random.value < chance;
+
+            foreach (var output in outputs)
             {
                 if (output == null || string.IsNullOrWhiteSpace(output.Shortname)) continue;
 
@@ -8220,12 +9720,22 @@ namespace Oxide.Plugins
                 var max = Math.Max(min, output.MaxAmount);
                 if (max <= 0) continue;
 
-                var amount = UnityEngine.Random.Range(min, max + 1);
+                var amount = GetPickupAmount(min, max);
                 if (amount <= 0) continue;
+                if (doubled) amount = (int)Math.Min(int.MaxValue, (long)amount * 2);
 
                 var given = ItemManager.Create(itemDef, amount);
-                if (given != null)
-                    player.GiveItem(given, BaseEntity.GiveItemReason.ResourceHarvested);
+                if (given == null) continue;
+                if (eat && itemDef.category == ItemCategory.Food)
+                {
+                    var consume = itemDef.GetComponent<ItemModConsume>();
+                    if (consume != null)
+                    {
+                        consume.DoAction(given, player);
+                        continue;
+                    }
+                }
+                player.GiveItem(given, BaseEntity.GiveItemReason.ResourceHarvested);
             }
         }
 
@@ -8239,8 +9749,6 @@ namespace Oxide.Plugins
                 _oreGatherSessions.Remove(baseEntity);
 
             if (spawnedOres.Count == 0 || !spawnedOres.TryGetValue(baseEntity, out var oreData)) return;
-            if (!IsCollectableType(oreData.Type)) return;
-
             spawnedOres.Remove(baseEntity);
             _oreGatherSessions.Remove(baseEntity);
             DecrementOreCount(oreData.Type, oreData.GatherMultiplier);
