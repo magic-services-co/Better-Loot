@@ -29,7 +29,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.5")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.6")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -84,6 +84,9 @@ namespace Oxide.Plugins
         private OreSpawnStoredData _oreStoredData;
         private readonly Dictionary<BaseEntity, OreNodeData> spawnedOres = new Dictionary<BaseEntity, OreNodeData>();
         private readonly Dictionary<BaseEntity, OreGatherSession> _oreGatherSessions = new Dictionary<BaseEntity, OreGatherSession>();
+        private const string ScarecrowPrefab = "assets/prefabs/npc/scarecrow/scarecrow.prefab";
+        private const string DungeonScarecrowPrefab = "assets/prefabs/npc/scarecrow/scarecrow_dungeon.prefab";
+        private const string NonRoamingDungeonScarecrowPrefab = "assets/prefabs/npc/scarecrow/scarecrow_dungeonnoroam.prefab";
         private readonly Dictionary<ulong, string> _corpseNpcPrefabs = new Dictionary<ulong, string>();
         private const string PlayerHarvestPrefab = "assets/prefabs/player/player.prefab";
         private static readonly string[][] HarvestPrefabAliases =
@@ -201,9 +204,10 @@ namespace Oxide.Plugins
             },
             new[]
             {
-                "assets/prefabs/npc/scarecrow/scarecrow.prefab",
-                "assets/prefabs/npc/scarecrow/scarecrow_dungeon.prefab",
-                "assets/prefabs/npc/scarecrow/scarecrow_dungeonnoroam.prefab"
+                ScarecrowPrefab,
+                DungeonScarecrowPrefab,
+                NonRoamingDungeonScarecrowPrefab,
+                "assets/prefabs/npc/murderer/murderer_corpse.prefab"
             },
             new[]
             {
@@ -372,6 +376,8 @@ namespace Oxide.Plugins
         private const string WHEAT_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/wheat/wheat-collectable.prefab";
         private const string HQM_ORE_PREFAB = "assets/bundled/prefabs/autospawn/resource/ore_hqm/hqm-ore.prefab";
         private const string WOOD_PILE_PREFAB = "assets/bundled/prefabs/autospawn/resource/wood_log_pile/wood-pile.prefab";
+        private const string DRIFTWOOD_PREFAB = "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_1.prefab";
+        private const string DEAD_LOG_PREFAB = "assets/bundled/prefabs/autospawn/resource/logs_wet/dead_log_a.prefab";
         private const string CACTUS_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_arid_cactus/cactus-1.prefab";
         private const string TREE_PREFAB = "assets/bundled/prefabs/autospawn/resource/v3_tundra_forestside/douglas_fir_d_small.prefab";
         private const string HQM_COLLECTABLE_PREFAB = "assets/bundled/prefabs/autospawn/collectable/stone/hqm-collectable.prefab";
@@ -538,6 +544,20 @@ namespace Oxide.Plugins
             public double AllowedDuplicateNudgeDifference = 10;
         }
 
+        public class ItemTextSettings
+        {
+            [JsonProperty("Text Data", DefaultValueHandling = DefaultValueHandling.Ignore, NullValueHandling = NullValueHandling.Ignore)]
+            public string? TextData = null;
+
+            // An omitted/empty setting preserves native text, including notes supplied by other plugins.
+            public void ApplyTextData(Item item)
+            {
+                if (item == null || string.IsNullOrEmpty(TextData)) return;
+                item.text = TextData;
+                item.MarkDirty();
+            }
+        }
+
         public class OreSpawnConfiguration
         {
             [JsonProperty("Enable Custom Ore Spawning")]
@@ -596,6 +616,10 @@ namespace Oxide.Plugins
                 Enabled = false,
                 BiomeProbabilities = new OreBiomeProbabilities { AridBiome = 0.1f, TemperateBiome = 0.45f, ArcticBiome = 0.25f, TundraBiome = 0.4f, JungleBiome = 0.4f }
             }, ChopGather("wood", 1000, 1000, 850, 750, 700, 450, 400));
+            [JsonProperty("Driftwood Settings")]
+            public OreTypeSettings Driftwood = new OreTypeSettings { GatherOnly = true, Enabled = false, Prefab = DRIFTWOOD_PREFAB, GatherOutputs = null };
+            [JsonProperty("Dead Log Settings")]
+            public OreTypeSettings DeadLog = new OreTypeSettings { GatherOnly = true, Enabled = false, Prefab = DEAD_LOG_PREFAB, GatherOutputs = null };
             [JsonProperty("Collectable Settings")]
             public OreCollectableConfiguration Collectables = new OreCollectableConfiguration();
             [JsonProperty("Debug Mode")]
@@ -637,7 +661,11 @@ namespace Oxide.Plugins
             private void PrepareGatherSerialization(StreamingContext context)
             {
                 // The section, rather than a customizable prefab path, determines the JSON shape.
-                foreach (var settings in new[] { Stone, Metal, Sulfur, HQM, WoodPile, Cactus, Tree })
+                Driftwood ??= new OreTypeSettings { Prefab = DRIFTWOOD_PREFAB };
+                DeadLog ??= new OreTypeSettings { Prefab = DEAD_LOG_PREFAB };
+                Driftwood.GatherOnly = DeadLog.GatherOnly = true;
+                Driftwood.Enabled = DeadLog.Enabled = false;
+                foreach (var settings in new[] { Stone, Metal, Sulfur, HQM, WoodPile, Cactus, Tree, Driftwood, DeadLog })
                     if (settings != null) settings.IsPickup = false;
 
                 if (LivestockProduction == null) return;
@@ -937,6 +965,8 @@ namespace Oxide.Plugins
 
         public class OreTypeSettings
         {
+            [JsonIgnore]
+            public bool GatherOnly;
             // Set by the containing config before writing; legacy fields remain readable.
             [JsonIgnore]
             public bool IsPickup;
@@ -967,6 +997,11 @@ namespace Oxide.Plugins
             public int PickupMaxAmount;
 
             public bool ShouldSerializeOverrideGatherAmounts() => !IsPickup;
+            public bool ShouldSerializeEnabled() => !GatherOnly;
+            public bool ShouldSerializeGridSize() => !GatherOnly;
+            public bool ShouldSerializePrefab() => !GatherOnly;
+            public bool ShouldSerializeBiomeProbabilities() => !GatherOnly;
+            public bool ShouldSerializeBonusLoot() => !GatherOnly;
             public bool ShouldSerializeGatherMultiplier() => !IsPickup;
             public bool ShouldSerializeGatherOutputs() => !IsPickup;
             public bool ShouldSerializeOverridePickupAmounts() => IsPickup;
@@ -2341,7 +2376,7 @@ namespace Oxide.Plugins
         #region Loot Classes
         public record ItemConvertInfo(Item Item, bool CanBeBp);
         
-        private class VanillaLootItem
+        private class VanillaLootItem : ItemTextSettings
         {
             [JsonProperty("Shortname")]
             public string Shortname = string.Empty;
@@ -2823,7 +2858,7 @@ namespace Oxide.Plugins
                     || item.Amount.additionalItems?.Values.Any(bonus => bonus is null) == true);
 
         #region Loot Entry
-        public class LootEntrySettings
+        public class LootEntrySettings : ItemTextSettings
         {
             [JsonProperty("Skin ID (0 = default)")]
             public ulong SkinId = 0;
@@ -2855,6 +2890,7 @@ namespace Oxide.Plugins
 
             public void ApplyAllProperties(Item item)
             {
+                ApplyTextData(item);
                 ApplyAmmo(item);
                 ApplyAttachments(item);
                 
@@ -3309,7 +3345,20 @@ namespace Oxide.Plugins
             if (corpse?.net != null && npcPlayer != null && !string.IsNullOrEmpty(npcPlayer.PrefabName))
                 _corpseNpcPrefabs[corpse.net.ID.Value] = npcPlayer.PrefabName;
 
-            return Initialized && npcPlayer != null && corpse != null && _config.Generic.WatchedPrefabs.TryGetValue(npcPlayer.PrefabName, out bool enabled) && enabled && PopulateContainer(npcPlayer.PrefabName, corpse, npcPlayer) ? corpse : null;
+            if (!Initialized || npcPlayer == null || corpse == null)
+                return null;
+
+            string prefab = npcPlayer.PrefabName;
+            var watched = _config.Generic.WatchedPrefabs;
+            if (watched.TryGetValue(prefab, out bool enabled) && !enabled)
+                return null;
+
+            if (npcPlayer is ScarecrowNPC && !lootTables.LootTables.ContainsKey(prefab)
+                && (prefab == DungeonScarecrowPrefab
+                    || prefab == NonRoamingDungeonScarecrowPrefab))
+                prefab = ScarecrowPrefab;
+
+            return watched.TryGetValue(prefab, out enabled) && enabled && PopulateContainer(prefab, corpse, prefab == npcPlayer.PrefabName ? npcPlayer : null) ? corpse : null;
         }
 
         private object? OnItemUnwrap(Item item, BasePlayer player, ItemModUnwrap itemModUnwrap)
@@ -3592,6 +3641,16 @@ namespace Oxide.Plugins
             return result;
         }
 
+        private static LootContainer.LootSpawnSlot[]? GetNpcLootSlots(BaseEntity? source)
+        {
+            return source switch
+            {
+                ScarecrowNPC scarecrow => scarecrow.LootSpawnSlots,
+                global::HumanNPC npc => npc.LootSpawnSlots,
+                _ => null
+            };
+        }
+
         private List<VanillaLootSlot> CaptureVanillaLootSlotsFromPrefab(string prefab)
         {
             try
@@ -3625,8 +3684,8 @@ namespace Oxide.Plugins
                         return CaptureVanillaLootSlots(lootFill.LootDefinition, lootFill.MaxDefinitionsToSpawn);
                 }
 
-                if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc && npc.LootSpawnSlots is { Length: > 0 })
-                    return CaptureVanillaLootSlots(npc.LootSpawnSlots);
+                if (GetNpcLootSlots(basePrefab.GetComponent<BaseEntity>()) is { Length: > 0 } slots)
+                    return CaptureVanillaLootSlots(slots);
 
 #if OXIDE_PUBLICIZED
                 if (basePrefab.TryGetComponent<FSMComponent>(out var fsm) &&
@@ -3945,10 +4004,10 @@ namespace Oxide.Plugins
                     }
                     #endregion
                     
-                    if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc)
-                    { // NPC Version 1
+                    if (GetNpcLootSlots(basePrefab.GetComponent<BaseEntity>()) is { } npcSlots)
+                    {
                         if (shouldBeEnabled)
-                            PopulateNPCType(npc.LootSpawnSlots);
+                            PopulateNPCType(npcSlots);
                     }
 #if OXIDE_PUBLICIZED
                     else if (basePrefab.TryGetComponent<FSMComponent>(out var fsm) && fsm is Scientist2FSM or Scientist2FSM_Heavy or Scientist2FSM_Shotgun)
@@ -4225,12 +4284,14 @@ namespace Oxide.Plugins
                     {
                         item.AppliedProperties = null;
                         if (string.IsNullOrWhiteSpace(item.Shortname) ||
-                            (string.IsNullOrWhiteSpace(item.DisplayName) && item.DurabilitySettings is null && item.ItemEntryModifications is null))
+                            (string.IsNullOrWhiteSpace(item.DisplayName) && string.IsNullOrEmpty(item.TextData)
+                                && item.DurabilitySettings is null && item.ItemEntryModifications is null))
                             continue;
 
                         var properties = new LootEntrySettings
                         {
                             DisplayName = item.DisplayName,
+                            TextData = item.TextData,
                             DurabilitySettings = item.DurabilitySettings,
                             ItemEntryModifications = item.ItemEntryModifications
                         };
@@ -4293,6 +4354,7 @@ namespace Oxide.Plugins
                 {
                     var basePrefab = FindLoadedPrefab(lootTable.Key);
                     validLootSource = (basePrefab?.HasComponent<global::HumanNPC>() ?? false) ||  // NPC v1
+                                      (basePrefab?.HasComponent<ScarecrowNPC>() ?? false) ||
                                       (basePrefab?.HasComponent<ScientistNPC2>() ?? false) || // NPC v2
                                       (basePrefab?.HasComponent<LootContainer>() ?? false) || // Loot Box
                                       (basePrefab?.HasComponent<LootFill>() ?? false); // Deep Sea Patrol Boat
@@ -4459,7 +4521,7 @@ namespace Oxide.Plugins
                 if (lootSource is LootFill liveFill && SpawnVanillaLootFillDefinition(liveFill, dest))
                     return true;
 
-                if (lootSource is global::HumanNPC liveNpc && liveNpc.LootSpawnSlots is { Length: > 0 } liveSlots)
+                if (GetNpcLootSlots(lootSource as BaseEntity) is { Length: > 0 } liveSlots)
                 {
                     SpawnVanillaLootSlots(liveSlots, dest);
                     return true;
@@ -4477,8 +4539,7 @@ namespace Oxide.Plugins
                     SpawnVanillaLootFillDefinition(prefabFill, dest))
                     return true;
 
-                if (basePrefab.GetComponent<global::HumanNPC>() is global::HumanNPC npc &&
-                    npc.LootSpawnSlots is { Length: > 0 } npcSlots)
+                if (GetNpcLootSlots(basePrefab.GetComponent<BaseEntity>()) is { Length: > 0 } npcSlots)
                 {
                     SpawnVanillaLootSlots(npcSlots, dest);
                     return true;
@@ -4990,7 +5051,10 @@ namespace Oxide.Plugins
 
             // Add scrap
             if (scrapAmt > 0)
-                items.Add(new (ItemManager.CreateByItemID(-932201673, scrapAmt * _config.Loot.ScrapMultiplier), false)); // Scrap item ID
+            {
+                var scrap = ItemManager.CreateByItemID(-932201673, scrapAmt * _config.Loot.ScrapMultiplier);
+                items.Add(new (scrap, false)); // Scrap item ID
+            }
 
             // Blueprint conversion pass
             if (_config.Loot.EnableBlueprintConversion && con.ItemSettings.MaxBlueprints > 0)
@@ -5038,6 +5102,7 @@ namespace Oxide.Plugins
 
                                 Item blueprint = ItemManager.Create(BlueprintBaseDef);
                                 blueprint.blueprintTarget = blueprintTarget;
+                                blueprint.text = originalItem.Item.text;
 
                                 originalItem.Item.Remove();
                                 items[itemIdx] = new ItemConvertInfo(blueprint, false);
@@ -5911,7 +5976,9 @@ namespace Oxide.Plugins
             CollectHalloweenMetal = 30,
             CollectHalloweenStone = 31,
             CollectHalloweenSulfur = 32,
-            CollectHalloweenWood = 33
+            CollectHalloweenWood = 33,
+            Driftwood = 34,
+            DeadLog = 35
         }
 
         private static readonly string[] OreTypeNames =
@@ -5921,14 +5988,16 @@ namespace Oxide.Plugins
             "Black Berry", "Blue Berry", "Green Berry", "Red Berry", "White Berry", "Yellow Berry",
             "Mushroom", "Corn", "Potato", "Pumpkin", "Orchid", "Rose", "Sunflower", "Wheat",
             "Wood Pile", "Cactus", "Tree", "HQM Pickup", "Coconut", "Diesel",
-            "Halloween Bone", "Halloween Metal", "Halloween Stone", "Halloween Sulfur", "Halloween Wood"
+            "Halloween Bone", "Halloween Metal", "Halloween Stone", "Halloween Sulfur", "Halloween Wood", "Driftwood", "Dead Log"
         };
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
         private static bool IsOreNodeType(OreType type) => type is OreType.Stone or OreType.Metal or OreType.Sulfur or OreType.HQM;
 
         [MethodImpl(MethodImplOptions.AggressiveInlining)]
-        private static bool IsHarvestType(OreType type) => type is OreType.WoodPile or OreType.Cactus or OreType.Tree;
+        private static bool IsHarvestType(OreType type) => type is OreType.WoodPile or OreType.Cactus or OreType.Tree or OreType.Driftwood or OreType.DeadLog;
+
+        private static bool IsGatherOnlyType(OreType type) => type is OreType.Driftwood or OreType.DeadLog;
 
         private enum OreShowKind : byte { All, Ore, Collectable, Harvest }
 
@@ -5998,6 +6067,8 @@ namespace Oxide.Plugins
             OreType.WoodPile => Ore.WoodPile,
             OreType.Cactus => Ore.Cactus,
             OreType.Tree => Ore.Tree,
+            OreType.Driftwood => Ore.Driftwood,
+            OreType.DeadLog => Ore.DeadLog,
             OreType.CollectStone => Ore.Collectables.Stone,
             OreType.CollectMetal => Ore.Collectables.Metal,
             OreType.CollectSulfur => Ore.Collectables.Sulfur,
@@ -6037,6 +6108,8 @@ namespace Oxide.Plugins
             yield return (OreType.WoodPile, Ore.WoodPile);
             yield return (OreType.Cactus, Ore.Cactus);
             yield return (OreType.Tree, Ore.Tree);
+            yield return (OreType.Driftwood, Ore.Driftwood);
+            yield return (OreType.DeadLog, Ore.DeadLog);
             yield return (OreType.CollectStone, Ore.Collectables.Stone);
             yield return (OreType.CollectMetal, Ore.Collectables.Metal);
             yield return (OreType.CollectSulfur, Ore.Collectables.Sulfur);
@@ -6103,6 +6176,8 @@ namespace Oxide.Plugins
 
                     if (settings.GatherOutputs is { Count: > 0 } && !replaceExistingGather)
                         continue;
+                    if (IsGatherOnlyType(pair.Type) && settings.GatherOutputs != null && !replaceExistingGather)
+                        continue; // Explicit empty family profiles are intentional.
 
                     var gather = CaptureGatherOutputsFromPrefab(settings.Prefab);
                     if (gather.Count == 0)
@@ -6600,8 +6675,17 @@ namespace Oxide.Plugins
             return changed;
         }
 
+        private void EnsureGatherOnlyProfiles()
+        {
+            Ore.Driftwood ??= new OreTypeSettings { Prefab = DRIFTWOOD_PREFAB, GatherOutputs = null };
+            Ore.DeadLog ??= new OreTypeSettings { Prefab = DEAD_LOG_PREFAB, GatherOutputs = null };
+            Ore.Driftwood.GatherOnly = Ore.DeadLog.GatherOnly = true;
+            Ore.Driftwood.Enabled = Ore.DeadLog.Enabled = false;
+        }
+
         private void InitOreSpawnSystem()
         {
+            EnsureGatherOnlyProfiles();
             Ore.NpcHarvest = Ore.NpcHarvest == null
                 ? new Dictionary<string, NpcHarvestSettings>(StringComparer.OrdinalIgnoreCase)
                 : new Dictionary<string, NpcHarvestSettings>(Ore.NpcHarvest, StringComparer.OrdinalIgnoreCase);
@@ -6702,6 +6786,7 @@ namespace Oxide.Plugins
 
         private void RestartOreSpawnSystem()
         {
+            EnsureGatherOnlyProfiles();
             if (RepairMissingOrePrefabs()) DataSystem.SaveOreSpawn();
             EnsureLivestockProductionDefaults();
             RefreshLivestockProductionTimers();
@@ -7022,7 +7107,7 @@ namespace Oxide.Plugins
         {
             foreach (var pair in EnumerateResourceTypes())
             {
-                if (pair.Settings is { Enabled: true })
+                if (!IsGatherOnlyType(pair.Type) && pair.Settings is { Enabled: true })
                     return true;
             }
             return false;
@@ -7033,6 +7118,7 @@ namespace Oxide.Plugins
 
         private bool IsResourceCustomEnabled(OreType type)
         {
+            if (IsGatherOnlyType(type)) return false;
             var settings = GetOreTypeSettings(type);
             return settings is { Enabled: true };
         }
@@ -7545,7 +7631,7 @@ namespace Oxide.Plugins
 
             foreach (var pair in EnumerateResourceTypes())
             {
-                if (pair.Settings is not { Enabled: true })
+                if (IsGatherOnlyType(pair.Type) || pair.Settings is not { Enabled: true })
                     continue;
                 if (_nativeSuppressedTypes.Contains(pair.Type))
                     continue;
@@ -7630,6 +7716,7 @@ namespace Oxide.Plugins
 
         private bool SpawnOre(OreSpawnPosition spawnData)
         {
+            if (IsGatherOnlyType(spawnData.Type)) return false;
             var prefab = ResolveOrePrefab(spawnData.Type, spawnData.Prefab);
             if (spawnData.Type == OreType.CollectMushroom)
                 prefab = UnityEngine.Random.Range(0, 2) == 0 ? MUSHROOM_CLUSTER_5_PREFAB : MUSHROOM_CLUSTER_6_PREFAB;
@@ -8138,18 +8225,19 @@ namespace Oxide.Plugins
                     amount = Math.Max(0, production.MilkAmount);
                     if (IsLivestockIntervalValid(production.MilkCooldownSeconds))
                         interval = production.MilkCooldownSeconds;
-                    __result = item != null && amount > 0 && interval > 0f;
+                    __result = item != null && amount > 0 && interval >= 0f;
                 }
             }
         }
 
-        private bool TryGetLivestockWoolAmount(Sheep sheep, ItemAmount item, out int amount)
+        private bool TryGetLivestockWoolAmount(Sheep sheep, ItemAmount item, out int amount, float scale = 1f)
         {
             amount = 0;
             if (item?.itemDef == null || item.amount <= 0f
                 || !string.Equals(item.itemDef.shortname, "wool", StringComparison.OrdinalIgnoreCase)
                 || !TryGetLivestockProduction(sheep, LivestockGene.Yield, out var production)) return false;
-            amount = Math.Max(0, production.WoolAmount);
+            amount = production.WoolAmount <= 0 || float.IsNaN(scale) || scale <= 0f ? 0
+                : (int)Math.Min(int.MaxValue, Math.Round((double)Math.Max(0, production.WoolAmount) * scale, MidpointRounding.ToEven));
             return true;
         }
 
@@ -8171,9 +8259,9 @@ namespace Oxide.Plugins
         [HarmonyPatch(typeof(Sheep), nameof(Sheep.FleeceAmount))]
         private static class Sheep_FleeceAmount_Patch
         {
-            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, ref int __result)
+            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, [HarmonyArgument(1)] float scale, ref int __result)
             {
-                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount) == true)
+                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount, scale) == true)
                     __result = amount;
             }
         }
@@ -8181,9 +8269,9 @@ namespace Oxide.Plugins
         [HarmonyPatch(typeof(Sheep), nameof(Sheep.ShornAmount))]
         private static class Sheep_ShornAmount_Patch
         {
-            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, ref int __result)
+            private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ItemAmount item, [HarmonyArgument(1)] float scale, ref int __result)
             {
-                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount) != true) return;
+                if (_instance?.TryGetLivestockWoolAmount(__instance, item, out var amount, scale) != true) return;
                 int count = LivestockWoolShornCount(__instance);
                 __result = LivestockWoolCumulativeAmount(amount, count) - LivestockWoolCumulativeAmount(amount, count - 1);
             }
@@ -8209,7 +8297,7 @@ namespace Oxide.Plugins
                 {
                     if (IsLivestockIntervalValid(production.WoolCooldownSeconds))
                         interval = production.WoolCooldownSeconds;
-                    __result = item != null && amount > 0 && interval > 0f;
+                    __result = item != null && amount > 0 && interval >= 0f;
                 }
             }
         }
@@ -8532,9 +8620,33 @@ namespace Oxide.Plugins
             return inferred;
         }
 
+        private static readonly HashSet<string> DriftwoodPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            DRIFTWOOD_PREFAB,
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_2.prefab",
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_3.prefab",
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_4.prefab",
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_5.prefab",
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_set_1.prefab",
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_set_2.prefab",
+            "assets/bundled/prefabs/autospawn/resource/driftwood/driftwood_set_3.prefab"
+        };
+
+        private static readonly HashSet<string> DeadLogPrefabs = new HashSet<string>(StringComparer.OrdinalIgnoreCase)
+        {
+            DEAD_LOG_PREFAB,
+            "assets/bundled/prefabs/autospawn/resource/logs_wet/dead_log_b.prefab",
+            "assets/bundled/prefabs/autospawn/resource/logs_wet/dead_log_c.prefab",
+            "assets/bundled/prefabs/autospawn/resource/logs_dry/dead_log_a.prefab",
+            "assets/bundled/prefabs/autospawn/resource/logs_dry/dead_log_b.prefab",
+            "assets/bundled/prefabs/autospawn/resource/logs_dry/dead_log_c.prefab"
+        };
+
         private static OreType? InferOreTypeFromPrefabUncached(string prefab)
         {
             var p = prefab;
+            if (DriftwoodPrefabs.Contains(p)) return OreType.Driftwood;
+            if (DeadLogPrefabs.Contains(p)) return OreType.DeadLog;
             if (p.Contains("halloween", StringComparison.OrdinalIgnoreCase))
             {
                 if (p.Contains("bone", StringComparison.OrdinalIgnoreCase)) return OreType.CollectHalloweenBone;
@@ -9060,7 +9172,8 @@ namespace Oxide.Plugins
             {
                 if (TryGetNpcHarvestSettings(entity, out var harvest))
                     return harvest.OverrideGatherAmounts && harvest.GatherOutputs is { Count: > 0 };
-                var type = entity is TreeEntity ? OreType.Tree : InferOreTypeFromPrefab(entity.PrefabName);
+                var type = InferOreTypeFromPrefab(entity.PrefabName);
+                if (!type.HasValue && entity is TreeEntity) type = OreType.Tree;
                 node = type.HasValue && IsNodeType(type.Value) ? GetOreTypeSettings(type.Value) : null;
             }
             return node is { OverrideGatherAmounts: true, GatherOutputs: { Count: > 0 } };
