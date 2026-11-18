@@ -29,7 +29,7 @@ using Rust;
 
 namespace Oxide.Plugins
 {
-    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.4")]
+    [Info("BetterLoot", "MagicServices.co // TGWA", "4.5.5")]
     [Description("Loot container editor with rarity support, plus optional ore and collectable spawning | Previously maintained and updated by Khan & Tryhard")]
     public class BetterLoot : RustPlugin
     {
@@ -7869,8 +7869,9 @@ namespace Oxide.Plugins
 
         private struct LivestockCooldownState
         {
-            public bool Applied;
-            public float Original;
+            public float? Original;
+            public float Rate;
+            public PersistentTimer Timer;
         }
 
         private struct DungCreateFrame
@@ -7889,11 +7890,13 @@ namespace Oxide.Plugins
         private static readonly System.Reflection.FieldInfo SheepWoolTimerField = AccessTools.Field(typeof(Sheep), "shearTimer");
         private static readonly System.Reflection.FieldInfo AnimalDungTimerField = AccessTools.Field(typeof(LivestockAnimal), "dungTimer");
 
-        // Timers retain the fraction of their current cycle when a setting changes.
-        // Store only the multiplier: native dung condition and random variance remain intact.
+        private static bool IsLivestockIntervalValid(float seconds) => seconds >= 0f && !float.IsInfinity(seconds);
+        private static float ConfiguredDungInterval(float seconds) => seconds == 0f ? 1f : seconds;
+
+        // Retain the fraction of the current cycle, including native dung modifiers.
         private static float LivestockTimerMultiplier(float configured, float vanilla)
         {
-            if (float.IsNaN(configured) || float.IsInfinity(configured) || configured < 0f || vanilla <= 0f || float.IsNaN(vanilla) || float.IsInfinity(vanilla))
+            if (!IsLivestockIntervalValid(configured) || !(vanilla > 0f) || float.IsInfinity(vanilla))
                 return 1f;
             var ratio = (double)configured / vanilla;
             return (float)Math.Min(float.MaxValue, ratio);
@@ -7919,57 +7922,33 @@ namespace Oxide.Plugins
         {
             if (animal == null || animal.IsDestroyed || !animal.isServer) return;
             var rates = _livestockTimerRates.GetOrCreateValue(animal);
-            bool yieldOverride = !restoreVanilla && TryGetLivestockProduction(animal, LivestockGene.Yield, out _);
             LivestockGeneProduction yield = null;
-            if (yieldOverride) TryGetLivestockProduction(animal, LivestockGene.Yield, out yield);
+            bool yieldOverride = !restoreVanilla && TryGetLivestockProduction(animal, LivestockGene.Yield, out yield);
             if (animal is Cow cow)
             {
                 float rate = yieldOverride ? LivestockTimerMultiplier(yield.MilkCooldownSeconds, cow.MilkCooldown / Math.Max(0.01f, cow.GeneScale(LivestockGene.Yield))) : 1f;
-                RefreshLivestockTimer(CowMilkTimerField?.GetValue(cow) as PersistentTimer, ref rates.Milk, rate, false);
+                RefreshLivestockTimer(CowMilkTimerField?.GetValue(cow) as PersistentTimer, ref rates.Milk, rate);
             }
             if (animal is Sheep sheep)
             {
                 float rate = yieldOverride ? LivestockTimerMultiplier(yield.WoolCooldownSeconds, sheep.ShearCooldown / Math.Max(0.01f, sheep.GeneScale(LivestockGene.Yield))) : 1f;
-                RefreshLivestockTimer(SheepWoolTimerField?.GetValue(sheep) as PersistentTimer, ref rates.Wool, rate, false);
+                RefreshLivestockTimer(SheepWoolTimerField?.GetValue(sheep) as PersistentTimer, ref rates.Wool, rate);
             }
             float dungRate = !restoreVanilla && TryGetLivestockProduction(animal, LivestockGene.Dung, out var dung)
-                ? LivestockTimerMultiplier(dung.DungIntervalSeconds < 0f ? float.NaN : Math.Max(1f, dung.DungIntervalSeconds), animal.DungInterval / Math.Max(0.01f, animal.GeneScale(LivestockGene.Dung))) : 1f;
-            RefreshLivestockTimer(AnimalDungTimerField?.GetValue(animal) as PersistentTimer, ref rates.Dung, dungRate, true);
+                ? LivestockTimerMultiplier(ConfiguredDungInterval(dung.DungIntervalSeconds), animal.DungInterval / Math.Max(0.01f, animal.GeneScale(LivestockGene.Dung))) : 1f;
+            RefreshLivestockTimer(AnimalDungTimerField?.GetValue(animal) as PersistentTimer, ref rates.Dung, dungRate);
         }
 
-        private static void RefreshLivestockTimer(PersistentTimer timer, ref float previous, float desired, bool automatic)
+        private static void RefreshLivestockTimer(PersistentTimer timer, ref float previous, float desired)
         {
             if (timer == null) return;
             if (timer.IsRunning && previous != desired)
             {
                 float remaining = RescaleLivestockRemaining(timer.Remaining, previous, desired);
-                timer.Start(automatic ? Math.Max(1f, remaining) : remaining);
+                float duration = RescaleLivestockRemaining(timer.Duration, previous, desired);
+                timer.Resume(remaining, Math.Max(remaining, duration));
             }
             previous = desired;
-        }
-
-        private void RememberLivestockTimerStart(LivestockAnimal animal, int id, bool applied, float original)
-        {
-            var rates = _livestockTimerRates.GetOrCreateValue(animal);
-            float rate = 1f;
-            if (applied && TryGetLivestockProduction(animal, id == 4 ? LivestockGene.Dung : LivestockGene.Yield, out var production))
-            {
-                float configured = id == 4 ? Math.Max(1f, production.DungIntervalSeconds) : id == 5 ? production.MilkCooldownSeconds : production.WoolCooldownSeconds;
-                rate = LivestockTimerMultiplier(configured, original / Math.Max(0.01f, animal.GeneScale(id == 4 ? LivestockGene.Dung : LivestockGene.Yield)));
-            }
-            if (id == 5) rates.Milk = rate;
-            else if (id == 6) rates.Wool = rate;
-            else
-            {
-                rates.Dung = rate;
-                var timer = AnimalDungTimerField?.GetValue(animal) as PersistentTimer;
-                if (applied && timer?.IsRunning == true)
-                {
-                    if (float.IsNaN(timer.Remaining)) timer.Start(1f);
-                    else if (float.IsInfinity(timer.Remaining)) timer.Start(float.MaxValue);
-                    else if (timer.Remaining < 1f) timer.Start(1f);
-                }
-            }
         }
 
         [HarmonyPatch(typeof(LivestockAnimal), nameof(LivestockAnimal.Save))]
@@ -7977,14 +7956,16 @@ namespace Oxide.Plugins
         {
             private static void Postfix(LivestockAnimal __instance, BaseNetworkable.SaveInfo info)
             {
-                // Rust persists remaining time only, without a rate. Normalize the saved
-                // copy to vanilla so the next load applies the current rate exactly once.
+                // Rust persists the remaining time and full duration without a rate.
+                // Normalize both so load applies the current rate exactly once.
                 if (!info.forDisk || _instance == null || info.msg?.livestockAnimal?.timers == null
                     || !_instance._livestockTimerRates.TryGetValue(__instance, out var rates)) return;
                 foreach (var timer in info.msg.livestockAnimal.timers)
                 {
                     float rate = timer.id == 4 ? rates.Dung : timer.id == 5 ? rates.Milk : timer.id == 6 ? rates.Wool : 1f;
+                    if (rate == 1f) continue;
                     timer.remaining = RescaleLivestockRemaining(timer.remaining, rate, 1f);
+                    timer.duration = RescaleLivestockRemaining(timer.duration, rate, 1f);
                 }
             }
         }
@@ -7992,10 +7973,23 @@ namespace Oxide.Plugins
         [HarmonyPatch(typeof(LivestockAnimal), nameof(LivestockAnimal.Load))]
         private static class LivestockProduction_Load_Patch
         {
+            private static void Prefix(LivestockAnimal __instance, BaseNetworkable.LoadInfo info)
+            {
+                if (!info.fromDisk || _instance == null || info.msg?.livestockAnimal?.timers == null
+                    || !_instance._livestockTimerRates.TryGetValue(__instance, out var rates)) return;
+                // A positive saved remainder replaces any timer started during server initialization.
+                foreach (var timer in info.msg.livestockAnimal.timers)
+                {
+                    if (!(timer.remaining > 0f)) continue;
+                    if (timer.id == 4) rates.Dung = 1f;
+                    else if (timer.id == 5) rates.Milk = 1f;
+                    else if (timer.id == 6) rates.Wool = 1f;
+                }
+            }
+
             private static void Postfix(LivestockAnimal __instance, BaseNetworkable.LoadInfo info)
             {
                 if (!info.fromDisk || _instance == null) return;
-                _instance._livestockTimerRates.Remove(__instance);
                 _instance.NextTick(() => _instance?.RefreshLivestockProductionTimers(__instance));
             }
         }
@@ -8006,14 +8000,13 @@ namespace Oxide.Plugins
             private static void Postfix(LivestockAnimal __instance, [HarmonyArgument(0)] LivestockAnimal target)
             {
                 if (_instance == null || target == null) return;
-                var targetRates = _instance._livestockTimerRates.GetOrCreateValue(target);
-                if (_instance._livestockTimerRates.TryGetValue(__instance, out var sourceRates))
+                // Rust carries sheep regrowth over and handles milk and dung on the replacement.
+                if (__instance is Sheep && target is Sheep)
                 {
-                    // Rust copies yield timers, but restarts dung after copying genes.
-                    targetRates.Milk = sourceRates.Milk;
-                    targetRates.Wool = sourceRates.Wool;
+                    var targetRates = _instance._livestockTimerRates.GetOrCreateValue(target);
+                    targetRates.Wool = _instance._livestockTimerRates.TryGetValue(__instance, out var sourceRates)
+                        ? sourceRates.Wool : 1f;
                 }
-                else targetRates.Milk = targetRates.Wool = 1f;
                 _instance.RefreshLivestockProductionTimers(target);
             }
         }
@@ -8034,17 +8027,6 @@ namespace Oxide.Plugins
 
             production = settings.ForTier(GeneTier(animal, gene));
             return production != null;
-        }
-
-        private float LivestockBestOfBreed(LivestockAnimal animal, int amount, float interval, bool wool)
-        {
-            if (amount <= 0 || interval <= 0f) return 0f;
-            var good = Ore.LivestockProduction[LivestockKey(animal)].ForTier(LivestockGeneTier.Good);
-            var goodAmount = wool ? good.WoolAmount : good.MilkAmount;
-            var goodInterval = wool ? good.WoolCooldownSeconds : good.MilkCooldownSeconds;
-            return goodAmount > 0 && goodInterval > 0f
-                ? Mathf.Clamp01((amount / interval) / (goodAmount / goodInterval))
-                : 0f;
         }
 
         private static string LivestockKey(LivestockAnimal animal)
@@ -8149,14 +8131,13 @@ namespace Oxide.Plugins
         private static class Cow_TryGetYield_Patch
         {
             private static void Postfix(Cow __instance, [HarmonyArgument(0)] ref ItemDefinition item,
-                [HarmonyArgument(1)] ref int amount, [HarmonyArgument(2)] ref float interval,
-                [HarmonyArgument(3)] ref float bestOfBreed, ref bool __result)
+                [HarmonyArgument(1)] ref int amount, [HarmonyArgument(2)] ref float interval, ref bool __result)
             {
                 if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) == true)
                 {
                     amount = Math.Max(0, production.MilkAmount);
-                    interval = Math.Max(0f, production.MilkCooldownSeconds);
-                    bestOfBreed = _instance.LivestockBestOfBreed(__instance, amount, interval, wool: false);
+                    if (IsLivestockIntervalValid(production.MilkCooldownSeconds))
+                        interval = production.MilkCooldownSeconds;
                     __result = item != null && amount > 0 && interval > 0f;
                 }
             }
@@ -8222,13 +8203,12 @@ namespace Oxide.Plugins
         private static class Sheep_TryGetYield_Patch
         {
             private static void Postfix(Sheep __instance, [HarmonyArgument(0)] ref ItemDefinition item,
-                [HarmonyArgument(1)] ref int amount, [HarmonyArgument(2)] ref float interval,
-                [HarmonyArgument(3)] ref float bestOfBreed, ref bool __result)
+                [HarmonyArgument(1)] ref int amount, [HarmonyArgument(2)] ref float interval, ref bool __result)
             {
                 if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) == true)
                 {
-                    interval = Math.Max(0f, production.WoolCooldownSeconds);
-                    bestOfBreed = _instance.LivestockBestOfBreed(__instance, amount, interval, wool: true);
+                    if (IsLivestockIntervalValid(production.WoolCooldownSeconds))
+                        interval = production.WoolCooldownSeconds;
                     __result = item != null && amount > 0 && interval > 0f;
                 }
             }
@@ -8237,84 +8217,67 @@ namespace Oxide.Plugins
         [HarmonyPatch(typeof(Cow), nameof(Cow.TryMilk))]
         private static class Cow_TryMilk_Patch
         {
-            private static bool Prefix(Cow __instance, ref bool __result, out LivestockCooldownState __state)
+            private static bool Prefix(Cow __instance, ref bool __result)
+            {
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) != true
+                    || production.MilkAmount > 0) return true;
+                __result = false;
+                return false;
+            }
+        }
+
+        // Rust can start or restart production without a player interaction.
+        [HarmonyPatch]
+        private static class LivestockProduction_StartYieldTimer_Patch
+        {
+            private static IEnumerable<MethodBase> TargetMethods()
+            {
+                yield return AccessTools.Method(typeof(Cow), "RefreshProduction");
+                yield return AccessTools.Method(typeof(Cow), "RestartProductionForGenes");
+                yield return AccessTools.Method(typeof(Sheep), "RefreshProduction");
+                yield return AccessTools.Method(typeof(Sheep), "StartRegrowing");
+            }
+
+            private static void Prefix(LivestockAnimal __instance, MethodBase __originalMethod, out LivestockCooldownState __state)
             {
                 __state = default;
-                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) != true) return true;
-                if (production.MilkAmount <= 0)
+                if (_instance == null) return;
+                var timer = (__instance is Cow ? CowMilkTimerField : SheepWoolTimerField)?.GetValue(__instance) as PersistentTimer;
+                // RefreshProduction uses RunWhile, which leaves a running timer in place.
+                if (timer == null || (__originalMethod.Name == "RefreshProduction" && timer.IsRunning)) return;
+                __state.Timer = timer;
+                __state.Rate = 1f;
+                if (!_instance.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production)) return;
+
+                var seconds = __instance is Cow ? production.MilkCooldownSeconds : production.WoolCooldownSeconds;
+                if (!IsLivestockIntervalValid(seconds)) return;
+                var scale = Math.Max(0.01f, __instance.GeneScale(LivestockGene.Yield));
+                var cooldown = (float)Math.Min(float.MaxValue, (double)seconds * scale);
+                float original;
+                if (__instance is Cow cow)
                 {
-                    __result = false;
-                    return false;
+                    original = cow.MilkCooldown;
+                    cow.MilkCooldown = cooldown;
                 }
-                if (float.IsNaN(production.MilkCooldownSeconds) || float.IsInfinity(production.MilkCooldownSeconds) || production.MilkCooldownSeconds < 0f) return true;
-                __state = new LivestockCooldownState { Applied = true, Original = __instance.MilkCooldown };
-                __instance.MilkCooldown = (float)Math.Min(float.MaxValue, (double)Math.Max(0f, production.MilkCooldownSeconds) * Math.Max(0.01f, __instance.GeneScale(LivestockGene.Yield)));
-                return true;
-            }
-
-            private static void Postfix(Cow __instance, bool __result, LivestockCooldownState __state)
-            {
-                if (__result) _instance?.RememberLivestockTimerStart(__instance, 5, __state.Applied, __state.Applied ? __state.Original : __instance.MilkCooldown);
-                Restore(__instance, __state);
-            }
-            private static Exception Finalizer(Cow __instance, LivestockCooldownState __state, Exception __exception)
-            {
-                Restore(__instance, __state);
-                return __exception;
-            }
-
-            private static void Restore(Cow animal, LivestockCooldownState state)
-            {
-                if (state.Applied) animal.MilkCooldown = state.Original;
-            }
-        }
-
-        [HarmonyPatch(typeof(Sheep), nameof(Sheep.Shear))]
-        private static class Sheep_Shear_Patch
-        {
-            private static void Prefix(Sheep __instance, out LivestockCooldownState __state)
-            {
-                __state = default;
-                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Yield, out var production) != true) return;
-                if (float.IsNaN(production.WoolCooldownSeconds) || float.IsInfinity(production.WoolCooldownSeconds) || production.WoolCooldownSeconds < 0f) return;
-                __state = new LivestockCooldownState { Applied = true, Original = __instance.ShearCooldown };
-                __instance.ShearCooldown = (float)Math.Min(float.MaxValue, (double)Math.Max(0f, production.WoolCooldownSeconds) * Math.Max(0.01f, __instance.GeneScale(LivestockGene.Yield)));
-            }
-
-            private static void Postfix(Sheep __instance, bool __result, LivestockCooldownState __state)
-            {
-                if (__result) _instance?.RememberLivestockTimerStart(__instance, 6, __state.Applied, __state.Applied ? __state.Original : __instance.ShearCooldown);
-                Restore(__instance, __state);
-            }
-            private static Exception Finalizer(Sheep __instance, LivestockCooldownState __state, Exception __exception)
-            {
-                Restore(__instance, __state);
-                return __exception;
-            }
-
-            private static void Restore(Sheep animal, LivestockCooldownState state)
-            {
-                if (state.Applied) animal.ShearCooldown = state.Original;
-            }
-        }
-
-        [HarmonyPatch(typeof(LivestockAnimal), "StartDungTimer")]
-        private static class LivestockAnimal_StartDungTimer_Patch
-        {
-            private static void Prefix(LivestockAnimal __instance, out LivestockCooldownState __state)
-            {
-                __state = default;
-                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Dung, out var production) != true) return;
-                if (float.IsNaN(production.DungIntervalSeconds) || float.IsInfinity(production.DungIntervalSeconds) || production.DungIntervalSeconds < 0f) return;
-                __state = new LivestockCooldownState { Applied = true, Original = __instance.DungInterval };
-                __instance.DungInterval = (float)Math.Min(float.MaxValue, (double)Math.Max(1f, production.DungIntervalSeconds) * Math.Max(0.01f, __instance.GeneScale(LivestockGene.Dung)));
+                else
+                {
+                    var sheep = (Sheep)__instance;
+                    original = sheep.ShearCooldown;
+                    sheep.ShearCooldown = cooldown;
+                }
+                __state.Original = original;
+                __state.Rate = LivestockTimerMultiplier(seconds, original / scale);
             }
 
             private static void Postfix(LivestockAnimal __instance, LivestockCooldownState __state)
             {
-                _instance?.RememberLivestockTimerStart(__instance, 4, __state.Applied, __state.Applied ? __state.Original : __instance.DungInterval);
                 Restore(__instance, __state);
+                if (_instance == null || __state.Timer?.IsRunning != true) return;
+                var rates = _instance._livestockTimerRates.GetOrCreateValue(__instance);
+                if (__instance is Cow) rates.Milk = __state.Rate;
+                else rates.Wool = __state.Rate;
             }
+
             private static Exception Finalizer(LivestockAnimal __instance, LivestockCooldownState __state, Exception __exception)
             {
                 Restore(__instance, __state);
@@ -8323,7 +8286,42 @@ namespace Oxide.Plugins
 
             private static void Restore(LivestockAnimal animal, LivestockCooldownState state)
             {
-                if (state.Applied) animal.DungInterval = state.Original;
+                if (!state.Original.HasValue) return;
+                if (animal is Cow cow) cow.MilkCooldown = state.Original.Value;
+                else if (animal is Sheep sheep) sheep.ShearCooldown = state.Original.Value;
+            }
+        }
+
+        [HarmonyPatch(typeof(LivestockAnimal), "StartDungTimer")]
+        private static class LivestockAnimal_StartDungTimer_Patch
+        {
+            private static void Prefix(LivestockAnimal __instance, out (float? Original, float Rate, bool UseLegacyMinimum) __state)
+            {
+                __state = (null, 1f, false);
+                if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Dung, out var production) != true) return;
+                if (!IsLivestockIntervalValid(production.DungIntervalSeconds)) return;
+                var seconds = ConfiguredDungInterval(production.DungIntervalSeconds);
+                var scale = Math.Max(0.01f, __instance.GeneScale(LivestockGene.Dung));
+                __state = (__instance.DungInterval, LivestockTimerMultiplier(seconds, __instance.DungInterval / scale),
+                    production.DungIntervalSeconds == 0f);
+                __instance.DungInterval = (float)Math.Min(float.MaxValue, (double)seconds * scale);
+            }
+
+            private static void Postfix(LivestockAnimal __instance, (float? Original, float Rate, bool UseLegacyMinimum) __state)
+            {
+                if (__state.Original.HasValue) __instance.DungInterval = __state.Original.Value;
+                if (_instance == null) return;
+                _instance._livestockTimerRates.GetOrCreateValue(__instance).Dung = __state.Rate;
+                if (!__state.Original.HasValue || AnimalDungTimerField?.GetValue(__instance) is not PersistentTimer timer || !timer.IsRunning)
+                    return;
+                if (float.IsPositiveInfinity(timer.Duration)) timer.Start(float.MaxValue);
+                else if (!(timer.Duration > 0f) || (__state.UseLegacyMinimum && timer.Duration < 1f)) timer.Start(1f);
+            }
+
+            private static Exception Finalizer(LivestockAnimal __instance, (float? Original, float Rate, bool UseLegacyMinimum) __state, Exception __exception)
+            {
+                if (__state.Original.HasValue) __instance.DungInterval = __state.Original.Value;
+                return __exception;
             }
         }
 
@@ -8333,11 +8331,12 @@ namespace Oxide.Plugins
             private static void Postfix(LivestockAnimal __instance, ref float __result)
             {
                 if (_instance?.TryGetLivestockProduction(__instance, LivestockGene.Dung, out var production) != true) return;
-                if (float.IsNaN(production.DungIntervalSeconds) || float.IsInfinity(production.DungIntervalSeconds) || production.DungIntervalSeconds < 0f) return;
+                if (!IsLivestockIntervalValid(production.DungIntervalSeconds)) return;
+                var seconds = ConfiguredDungInterval(production.DungIntervalSeconds);
                 var vanillaBase = __instance.DungInterval / Math.Max(0.01f, __instance.GeneScale(LivestockGene.Dung));
                 __result = vanillaBase > 0f
-                    ? (float)Math.Min(float.MaxValue, (double)__result * Math.Max(1f, production.DungIntervalSeconds) / vanillaBase)
-                    : Math.Max(1f, production.DungIntervalSeconds);
+                    ? (float)Math.Min(float.MaxValue, (double)__result * seconds / vanillaBase)
+                    : seconds;
             }
         }
 
